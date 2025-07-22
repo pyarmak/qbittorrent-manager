@@ -1,0 +1,59 @@
+#!/usr/bin/with-contenv bash
+# shellcheck shell=bash
+
+echo "Starting qBittorrent Manager Service initialization..."
+
+# Set permissions on the script directory
+echo "Setting permissions on qbit-manager directory..."
+lsiown -R abc:abc /app
+chmod +x /app/*.py
+
+# Create necessary directories
+echo "Creating required directories..."
+mkdir -p /config/log
+mkdir -p /config/qbit-manager-state
+lsiown -R abc:abc /config/log
+lsiown -R abc:abc /config/qbit-manager-state
+
+# Check for configuration file
+echo "Checking for configuration file..."
+if [ ! -f "/config/config.toml" ]; then
+    echo "Creating default configuration file..."
+    cp /defaults/config.toml /config/config.toml
+    lsiown abc:abc /config/config.toml
+    echo ""
+    echo "=============================================="
+    echo "IMPORTANT: CONFIGURATION REQUIRED!"
+    echo "=============================================="
+    echo "A default configuration file has been created at:"
+    echo "  /config/config.toml"
+    echo ""
+    echo "Please edit this file to customize your settings:"
+    echo "  - Set your qBittorrent credentials"
+    echo "  - Configure storage paths"
+    echo "  - Set a secure HTTP API key"
+    echo "  - Configure Sonarr/Radarr API keys"
+    echo ""
+    echo "The service will use default values until configured."
+    echo "=============================================="
+fi
+
+echo "Container configuration complete."
+echo ""
+echo "=== qBittorrent Configuration Required ==="
+echo "The qBittorrent Manager runs as an HTTP service. Configure qBittorrent to notify the service:"
+echo ""
+echo "Method 1 - HTTP Notification Script (Recommended):"
+echo "  Use the provided script: /qbit-manager/examples/qbittorrent-notification.sh"
+echo "  Configure in qBittorrent: Settings > Downloads > Run external program on torrent completed:"
+echo "  /qbit-manager/examples/qbittorrent-notification.sh \"%I\" \"%N\" \"%L\" \"%F\" %C %Z \"%G\""
+echo ""
+echo "Method 2 - Direct cURL (Simple):"
+echo "  curl -X POST -H \"X-API-Key: YOUR_API_KEY\" \\"
+echo "       -H \"Content-Type: application/json\" \\"
+echo "       -d '{\"hash\":\"%I\"}' \\"
+echo "       http://localhost:8081/notify/torrent-finished"
+echo ""
+echo "Configuration: Edit /config/config.toml"
+echo "Service API: http://localhost:8081"
+echo "Documentation: /qbit-manager/SERVICE_API.md" 

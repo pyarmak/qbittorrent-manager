@@ -1,0 +1,92 @@
+# qBittorrent Manager Configuration
+# Copy this file to config.toml and customize for your environment
+
+[general]
+# Timezone for logging and scheduling
+timezone = "America/New_York"
+# User and group IDs for file operations (Docker)
+puid = 1000
+pgid = 1000
+# Log level: DEBUG, INFO, WARNING, ERROR
+log_level = "INFO"
+# Enable dry run mode (no actual file operations)
+dry_run = false
+
+[paths]
+# Storage paths - these must match your Docker volume mounts
+[paths.downloads]
+# SSD cache path - where torrents actively download (fast storage)
+ssd = "/downloads/ssd"
+# HDD destination base - where completed torrents are moved (slow storage)
+hdd = "/downloads/hdd"
+
+[paths.config]
+# Configuration and state directories
+base = "/config"
+logs = "/config/log"
+state = "/config/qbit-manager-state"
+
+[qbittorrent]
+# qBittorrent connection settings
+host = "localhost"
+port = 8080
+username = "admin"
+password = "adminadmin"
+# Verify SSL certificates (set false for self-signed)
+verify_ssl = true
+
+[http_service]
+# HTTP API service configuration
+enabled = true
+host = "127.0.0.1"  # Only localhost by default for security
+port = 8081
+# IMPORTANT: Set a secure random API key for authentication
+api_key = "your-secure-random-api-key-here"
+
+[processing]
+# Torrent processing settings
+[processing.concurrency]
+# Maximum number of torrents to process simultaneously
+max_concurrent = 3
+
+[processing.storage]
+# Disk space threshold in GB - when SSD free space drops below this, 
+# older torrents are relocated to HDD
+threshold_gb = 100
+
+[processing.copy]
+# Number of retry attempts for failed copy operations
+retry_attempts = 3
+# Enable copy verification (highly recommended)
+verification_enabled = true
+
+[notifications]
+# Arr application notifications
+enabled = true
+
+[notifications.sonarr]
+url = "http://sonarr:8989"
+api_key = "your-sonarr-api-key-here"
+tag = "sonarr"
+
+[notifications.radarr]
+url = "http://radarr:7878"
+api_key = "your-radarr-api-key-here"
+tag = "radarr"
+
+[storage_tags]
+# Tags used to track torrent storage location for efficient filtering
+enabled = true
+# Automatically tag new torrents when they complete
+auto_tag_new = true
+# Tag names for different storage locations
+ssd_tag = "ssd"
+hdd_tag = "hdd"
+
+[logging]
+# Logging configuration
+file = "/config/log/qbit-manager.log"
+# Console logging for Docker
+console = true
+# Detailed logging for debugging
+detailed = false 

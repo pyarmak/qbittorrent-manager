@@ -1,0 +1,6 @@
+#!/usr/bin/with-contenv bash
+
+# qBittorrent Manager Service
+# Runs the HTTP API orchestrator for managing torrent processing and space management
+
+exec s6-setuidgid abc python3 /app/main.py
