@@ -116,7 +116,7 @@ def notify_arr_scan_downloads(service_type, download_id: 'BTIH', arr_config, hdd
 
 def relocate_and_delete_ssd(client: 'QBittorrentClient', torrent_info: 'TorrentInfo', final_dest_base_hdd: str, download_path_ssd: str):
     """ Stops torrent, sets qBittorrent location to HDD path, deletes SSD copy, restarts. Uses qBittorrent API."""
-    hdd_base_dir = os.path.join(final_dest_base_hdd, torrent_info.label)
+    hdd_base_dir = os.path.join(final_dest_base_hdd, torrent_info.category)
     logger.info(f"Attempting relocation for {torrent_info.hash} ('{torrent_info.name}'):")
     logger.info(f"SSD path (to delete): {torrent_info.path}")
     logger.info(f"Target HDD base dir (for qBittorrent): {hdd_base_dir}")
@@ -270,14 +270,14 @@ def process_single_torrent_optimized(client: 'QBittorrentClient', torrent_info: 
     # Extract needed variables (no API calls needed!)
     is_multi = torrent_info.is_multi_file
     ssd_data_path = torrent_info.path
-    tag = torrent_info.label
+    category = torrent_info.category
 
     # 2. Construct Paths using config paths
-    hdd_base_dir = os.path.join(config.FINAL_DEST_BASE_HDD, tag)
+    hdd_base_dir = os.path.join(config.FINAL_DEST_BASE_HDD, category)
     hdd_data_path = os.path.join(hdd_base_dir, torrent_info.name.strip())
     logger.info(f"Source SSD Path: {ssd_data_path}")
     logger.info(f"Target HDD Path: {hdd_data_path}")
-    logger.info(f"Torrent Tag: {tag}")
+    logger.info(f"Torrent Category: {category}")
     logger.info(f"Multi-file: {is_multi} ({torrent_info.size / (1024**3):.2f} GB)")
 
     # 3. Pre-Copy Check: Handle existing destination from previous script run
@@ -350,9 +350,9 @@ def process_single_torrent_optimized(client: 'QBittorrentClient', torrent_info: 
         
         service_to_notify = None
         # Determine which service to notify based on tag (using config tags)
-        if tag.lower() == config.SONARR_TAG.lower(): service_to_notify = "sonarr"
-        elif tag.lower() == config.RADARR_TAG.lower(): service_to_notify = "radarr"
-        else: logger.info(f"Tag '{tag}' does not match Sonarr/Radarr tags. Skipping notification.")
+        if category.lower() == config.SONARR_TAG.lower(): service_to_notify = "sonarr"
+        elif category.lower() == config.RADARR_TAG.lower(): service_to_notify = "radarr"
+        else: logger.info(f"Tag '{category}' does not match Sonarr/Radarr tags. Skipping notification.")
 
         # If a matching service was found, send the notification
         if service_to_notify:
@@ -468,7 +468,7 @@ def manage_ssd_space(client: 'QBittorrentClient'):
                     directory=os.path.dirname(torrent.content_path) if torrent.content_path else "",
                     size=torrent.size,
                     is_multi_file=is_multi_file,
-                    label=torrent.category or ""
+                    category=torrent.category or ""
                 )
                 info = {
                     "torrent_info": torrent_info,

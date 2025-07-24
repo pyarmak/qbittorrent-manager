@@ -141,11 +141,6 @@ class TorrentInfo:
         """True if torrent contains multiple files"""
         return self.num_files > 1
     
-    @property
-    def label(self) -> str:
-        """Legacy label property (maps to category)"""
-        return self.category
-    
     @classmethod
     def from_qbittorrent_api(cls, torrent_dict: Dict[str, Any], files_count: Optional[int] = None) -> 'TorrentInfo':
         """
