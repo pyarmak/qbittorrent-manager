@@ -4,7 +4,7 @@
 # 
 # Configure this script in qBittorrent:
 # Settings > Downloads > Run external program on torrent completed:
-# /qbit-manager/examples/qbittorrent-notification.sh "%I" "%N" "%L" "%F" "%R" "%D" %C %Z "%G" "%T" "%J" "%K"
+# /scripts/qbittorrent-notification.sh "%I" "%N" "%L" "%F" "%R" "%D" %C %Z "%G" "%T" "%J" "%K"
 #
 # Parameters explanation:
 # %I = Info hash v1 (SHA-1, 40 chars) - Primary hash for compatibility
@@ -21,25 +21,9 @@
 # %K = Torrent ID (qBittorrent internal ID)
 
 # Configuration
-# Try to read API key from TOML config file, fallback to environment variable
-if [ -f "/config/config.toml" ]; then
-    API_KEY=$(python3 -c "
-try:
-    import tomllib
-    with open('/config/config.toml', 'rb') as f:
-        config = tomllib.load(f)
-    print(config.get('http_service', {}).get('api_key', ''))
-except:
-    print('')
-" 2>/dev/null)
-fi
+API_KEY="${QBIT_MANAGER_API_KEY}"
 
-# Fallback to environment variable if TOML reading failed
-if [ -z "$API_KEY" ]; then
-    API_KEY="${HTTP_API_KEY:-your-api-key-here}"
-fi
-
-SERVICE_URL="${QBIT_MANAGER_URL:-http://localhost:8081}"
+SERVICE_URL="${QBIT_MANAGER_URL}"
 
 # Extract parameters in order
 HASH_V1="$1"        # %I - Info hash v1 (primary)
