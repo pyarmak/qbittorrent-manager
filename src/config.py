@@ -106,7 +106,7 @@ def get_env_override(env_var: str, config_path: str, default=None, value_type=st
 # --- General Settings ---
 PUID = get_env_override('PUID', 'general.puid', 1000, int)
 PGID = get_env_override('PGID', 'general.pgid', 1000, int)
-LOG_LEVEL = get_env_override('LOG_LEVEL', 'logging.level', 'INFO').upper()
+LOG_LEVEL = get_env_override('LOG_LEVEL', 'general.log_level', 'INFO').upper()
 DRY_RUN = get_env_override('DRY_RUN', 'general.dry_run', False, bool)
 
 # --- Storage Paths ---
