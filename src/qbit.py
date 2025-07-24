@@ -233,7 +233,7 @@ def get_all_torrents(client: 'QBittorrentClient') -> typing.List['TorrentDiction
     """
     logger.debug("Getting all torrents")
     try:
-        return client.torrents_info()
+        return client.torrents_info(SIMPLE_RESPONSES=True)
     except Exception as e:
         logger.error(f"Failed to get all torrents: {e}")
         raise

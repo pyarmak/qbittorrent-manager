@@ -5,7 +5,7 @@ import shutil
 import time
 import requests
 import typing
-from classes import TorrentInfo, BTIH
+from classes import TorrentInfo, BTIH, TimeoutError
 from tags import add_hdd_tag, remove_ssd_tag
 from qbit import (
     get_torrent_by_hash, get_torrents_by_status,
@@ -452,24 +452,29 @@ def manage_ssd_space(client: 'QBittorrentClient'):
                     continue
                 
                 # Create TorrentInfo object for relocation function efficiently
-                # Note: TorrentInfo and BTIH already imported at top of file
                 # Determine if torrent is multi-file using proper qBittorrent API
                 try:
                     files_list = client.torrents_files(torrent_hash=torrent.hash)
-                    is_multi_file = len(files_list) > 1
+                    files_count = len(files_list)
                 except:
                     # Fallback - assume single file if API call fails
-                    is_multi_file = False
-            
-                torrent_info = TorrentInfo(
-                    hash=BTIH(torrent.hash),
-                    name=torrent.name,
-                    path=torrent.content_path,
-                    directory=os.path.dirname(torrent.content_path) if torrent.content_path else "",
-                    size=torrent.size,
-                    is_multi_file=is_multi_file,
-                    category=torrent.category or ""
-                )
+                    files_count = 1
+                
+                # Convert torrent object to dictionary for the factory method
+                torrent_dict = {
+                    'hash': torrent.hash,
+                    'name': torrent.name,
+                    'content_path': getattr(torrent, 'content_path', ''),
+                    'save_path': getattr(torrent, 'save_path', ''),
+                    'root_path': getattr(torrent, 'root_path', ''),
+                    'size': getattr(torrent, 'size', 0),
+                    'category': getattr(torrent, 'category', '') or '',
+                    'tags': getattr(torrent, 'tags', ''),
+                    'tracker': getattr(torrent, 'tracker', ''),
+                }
+                
+                # Create TorrentInfo using the factory method
+                torrent_info = TorrentInfo.from_qbittorrent_api(torrent_dict, files_count)
                 info = {
                     "torrent_info": torrent_info,
                     "size": torrent.size/(1024**3),
