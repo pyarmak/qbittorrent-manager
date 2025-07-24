@@ -384,6 +384,7 @@ async def notify_torrent_finished(request):
     """Handle torrent completion notification from qBittorrent"""
     try:
         data = await request.json()
+        logger.debug(f"Received torrent completion notification: {data}")
         
         # Extract torrent information
         torrent_hash = data.get('hash')

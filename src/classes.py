@@ -163,7 +163,7 @@ class TorrentInfo:
             category=torrent_dict.get('category', ''),
             tags=','.join(torrent_dict.get('tags', [])) if isinstance(torrent_dict.get('tags'), list) else torrent_dict.get('tags', ''),
             current_tracker=torrent_dict.get('tracker', ''),
-            hash_v2=BTIH(torrent_dict.get('hash_v2', '')) if torrent_dict.get('hash_v2') else None,
+            hash_v2=BTIH(torrent_dict.get('hash_v2', '')) if torrent_dict.get('hash_v2') and torrent_dict.get('hash_v2') not in ['', '-', 'None', 'null'] and len(torrent_dict.get('hash_v2', '')) >= 32 else None,
             torrent_id=str(torrent_dict.get('id', ''))
         )
     
@@ -189,7 +189,7 @@ class TorrentInfo:
             category=params.get('category', ''),
             tags=params.get('tags', ''),
             current_tracker=params.get('tracker', ''),
-            hash_v2=BTIH(params.get('hash_v2', '')) if params.get('hash_v2') else None,
+            hash_v2=BTIH(params.get('hash_v2', '')) if params.get('hash_v2') and params.get('hash_v2') not in ['', '-', 'None', 'null'] and len(params.get('hash_v2', '')) >= 32 else None,
             torrent_id=params.get('torrent_id', '')
         )
     
