@@ -79,7 +79,7 @@ def _convert_qbt_torrents_to_torrent_info(torrents, client=None) -> typing.List[
 # Tag Management Functions
 # ===================================================================
 
-def tag_existing_torrents_by_location(client: 'QBittorrentClient', dry_run=False):
+def tag_existing_torrents_by_location(client: 'QBittorrentClient', dry_run=False, async_copies=True):
     """
     Tag existing torrents based on their current storage location.
     This is useful for initial setup or migrating to the tagging system.
@@ -91,6 +91,7 @@ def tag_existing_torrents_by_location(client: 'QBittorrentClient', dry_run=False
     Args:
         client: qBittorrent client instance
         dry_run: If True, only show what would be tagged without making changes
+        async_copies: If True, return copy operations for async handling instead of executing them
     
     Returns:
         dict: Summary of tagging operations including any copy operations
@@ -109,9 +110,10 @@ def tag_existing_torrents_by_location(client: 'QBittorrentClient', dry_run=False
         raw_torrents = get_all_torrents(client)
         all_torrent_infos = _convert_qbt_torrents_to_torrent_info(raw_torrents, client)
         
-        ssd_candidates = []
-        hdd_candidates = []
-        copy_operations = []
+        # Group torrents by action needed - use bulk operations
+        ssd_tag_hashes = []      # Torrents that need SSD tag
+        hdd_tag_hashes = []      # Torrents that need HDD tag
+        copy_operations = []     # Copy operations (for async handling)
         untaggable = []
         
         for torrent_info in all_torrent_infos:
@@ -136,13 +138,7 @@ def tag_existing_torrents_by_location(client: 'QBittorrentClient', dry_run=False
                     
                     # Always ensure SSD tag is present
                     if not has_ssd_tag:
-                        ssd_candidates.append({
-                            'hash': str(torrent_info.hash),
-                            'name': torrent_info.name,
-                            'path': torrent_info.content_path,
-                            'current_tags': current_tags,
-                            'action': 'add_ssd_tag'
-                        })
+                        ssd_tag_hashes.append(str(torrent_info.hash))
                     
                     # Check if HDD copy exists (determine expected HDD path)
                     try:
@@ -156,14 +152,7 @@ def tag_existing_torrents_by_location(client: 'QBittorrentClient', dry_run=False
                                 # HDD copy exists - ensure HDD tag is present
                                 logger.debug(f"HDD copy found for {torrent_info.name}")
                                 if not has_hdd_tag:
-                                    hdd_candidates.append({
-                                        'hash': str(torrent_info.hash),
-                                        'name': torrent_info.name,
-                                        'path': torrent_info.content_path,
-                                        'hdd_path': expected_hdd_path,
-                                        'current_tags': current_tags,
-                                        'action': 'add_hdd_tag'
-                                    })
+                                    hdd_tag_hashes.append(str(torrent_info.hash))
                             else:
                                 # HDD copy missing - needs copy operation
                                 logger.debug(f"HDD copy MISSING for {torrent_info.name}")
@@ -199,13 +188,7 @@ def tag_existing_torrents_by_location(client: 'QBittorrentClient', dry_run=False
                     # Torrent is currently pointing to HDD location
                     logger.debug(f"Analyzing HDD torrent: {torrent_info.name}")
                     if not has_hdd_tag:
-                        hdd_candidates.append({
-                            'hash': str(torrent_info.hash),
-                            'name': torrent_info.name,
-                            'path': torrent_info.content_path,
-                            'current_tags': current_tags,
-                            'action': 'add_hdd_tag'
-                        })
+                        hdd_tag_hashes.append(str(torrent_info.hash))
                 else:
                     untaggable.append({
                         'hash': str(torrent_info.hash),
@@ -223,12 +206,12 @@ def tag_existing_torrents_by_location(client: 'QBittorrentClient', dry_run=False
                 })
         
         # Summary
-        total_operations = len(ssd_candidates) + len(hdd_candidates) + len(copy_operations)
+        total_tag_operations = len(ssd_tag_hashes) + len(hdd_tag_hashes)
         
         logger.info(f"Enhanced tagging analysis complete:")
-        logger.info(f"  SSD tag operations: {len(ssd_candidates)}")
-        logger.info(f"  HDD tag operations: {len(hdd_candidates)}")
-        logger.info(f"  Copy + tag operations: {len(copy_operations)}")
+        logger.info(f"  SSD tags needed: {len(ssd_tag_hashes)}")
+        logger.info(f"  HDD tags needed: {len(hdd_tag_hashes)}")
+        logger.info(f"  Copy operations needed: {len(copy_operations)}")
         logger.info(f"  Untaggable torrents: {len(untaggable)}")
 
         # Print unique 'reasons' for untaggable torrents
@@ -238,15 +221,11 @@ def tag_existing_torrents_by_location(client: 'QBittorrentClient', dry_run=False
         if dry_run:
             logger.info("[DRY RUN] Would perform the following operations:")
             
-            # SSD tagging operations
-            for item in ssd_candidates:
-                if item['action'] == 'add_ssd_tag':
-                    logger.info(f"  🏷️  Add '{config.SSD_LOCATION_TAG}' tag to: {item['name']}")
-            
-            # HDD tagging operations  
-            for item in hdd_candidates:
-                if item['action'] == 'add_hdd_tag':
-                    logger.info(f"  🏷️  Add '{config.HDD_LOCATION_TAG}' tag to: {item['name']}")
+            # Show bulk tagging operations
+            if ssd_tag_hashes:
+                logger.info(f"  🏷️  Add '{config.SSD_LOCATION_TAG}' tag to {len(ssd_tag_hashes)} torrents (BULK)")
+            if hdd_tag_hashes:
+                logger.info(f"  🏷️  Add '{config.HDD_LOCATION_TAG}' tag to {len(hdd_tag_hashes)} torrents (BULK)")
             
             # Copy + tag operations
             for item in copy_operations:
@@ -265,107 +244,151 @@ def tag_existing_torrents_by_location(client: 'QBittorrentClient', dry_run=False
             
             return {
                 'dry_run': True,
-                'total_operations': total_operations,
-                'ssd_operations': len(ssd_candidates),
-                'hdd_operations': len(hdd_candidates),
+                'total_tag_operations': total_tag_operations,
+                'ssd_operations': len(ssd_tag_hashes),
+                'hdd_operations': len(hdd_tag_hashes),
                 'copy_operations': len(copy_operations),
-                'untaggable': len(untaggable)
+                'untaggable': len(untaggable),
+                'copy_operations_list': copy_operations if async_copies else []
             }
         
-        # Perform actual operations (tagging + copying)
+        # Perform actual BULK tagging operations (fast)
         successful_operations = 0
         failed_operations = 0
         
-        logger.info("Performing enhanced tagging and copy operations...")
+        logger.info("Performing BULK tagging operations...")
         
-        # Process SSD tagging candidates
-        for item in ssd_candidates:
+        # BULK SSD tagging
+        if ssd_tag_hashes:
             try:
-                if item['action'] == 'add_ssd_tag':
-                    client.torrents_add_tags(tags=config.SSD_LOCATION_TAG, torrent_hashes=item['hash'])
-                    logger.debug(f"Added '{config.SSD_LOCATION_TAG}' tag to {item['name']}")
-                    successful_operations += 1
+                logger.info(f"Adding '{config.SSD_LOCATION_TAG}' tag to {len(ssd_tag_hashes)} torrents (BULK)")
+                client.torrents_add_tags(tags=config.SSD_LOCATION_TAG, torrent_hashes=ssd_tag_hashes)
+                logger.info(f"✅ Successfully added SSD tags to {len(ssd_tag_hashes)} torrents")
+                successful_operations += len(ssd_tag_hashes)
             except Exception as e:
-                logger.error(f"Failed to add SSD tag to {item['name']}: {e}")
-                failed_operations += 1
+                logger.error(f"❌ Failed to add SSD tags in bulk: {e}")
+                failed_operations += len(ssd_tag_hashes)
         
-        # Process HDD tagging candidates
-        for item in hdd_candidates:
+        # BULK HDD tagging
+        if hdd_tag_hashes:
             try:
-                if item['action'] == 'add_hdd_tag':
-                    client.torrents_add_tags(tags=config.HDD_LOCATION_TAG, torrent_hashes=item['hash'])
-                    logger.debug(f"Added '{config.HDD_LOCATION_TAG}' tag to {item['name']}")
-                    successful_operations += 1
+                logger.info(f"Adding '{config.HDD_LOCATION_TAG}' tag to {len(hdd_tag_hashes)} torrents (BULK)")
+                client.torrents_add_tags(tags=config.HDD_LOCATION_TAG, torrent_hashes=hdd_tag_hashes)
+                logger.info(f"✅ Successfully added HDD tags to {len(hdd_tag_hashes)} torrents")
+                successful_operations += len(hdd_tag_hashes)
             except Exception as e:
-                logger.error(f"Failed to add HDD tag to {item['name']}: {e}")
-                failed_operations += 1
+                logger.error(f"❌ Failed to add HDD tags in bulk: {e}")
+                failed_operations += len(hdd_tag_hashes)
         
-        # Process copy + tag operations
-        for item in copy_operations:
-            try:
-                if item['action'] == 'copy_and_tag_hdd':
-                    logger.info(f"📁 Copying {item['name']} from SSD to HDD...")
-                    
-                    # Use is_multi_file from TorrentInfo data
-                    is_multi_file = item.get('is_multi_file', os.path.isdir(item['ssd_path']))
-                    
-                    # Ensure HDD base directory exists
-                    hdd_base_dir = os.path.dirname(item['hdd_path'])
-                    os.makedirs(hdd_base_dir, exist_ok=True)
-                    
-                    # Perform copy operation
-                    copy_start_time = time.time()
+        # Handle copy operations based on async_copies flag
+        if copy_operations:
+            if async_copies:
+                # Return copy operations for async handling - don't block here
+                logger.info(f"📁 {len(copy_operations)} copy operations queued for async processing")
+                
+                logger.info(f"Bulk tagging complete: {successful_operations} successful, {failed_operations} failed")
+                
+                return {
+                    'dry_run': False,
+                    'total_tag_operations': total_tag_operations,
+                    'successful_tags': successful_operations,
+                    'failed_tags': failed_operations,
+                    'ssd_operations': len(ssd_tag_hashes),
+                    'hdd_operations': len(hdd_tag_hashes),
+                    'copy_operations': len(copy_operations),
+                    'copy_operations_list': copy_operations,  # For async handling
+                    'untaggable': len(untaggable)
+                }
+            else:
+                # Synchronous copy operations (legacy behavior)
+                logger.warning("Performing synchronous copy operations - this may take a long time!")
+                copy_successful = 0
+                copy_failed = 0
+                
+                for item in copy_operations:
                     try:
-                        if is_multi_file:
-                            shutil.copytree(item['ssd_path'], item['hdd_path'], copy_function=shutil.copy2, dirs_exist_ok=True)
-                        else:
-                            shutil.copy2(item['ssd_path'], item['hdd_path'])
+                        logger.info(f"📁 Copying {item['name']} from SSD to HDD...")
                         
-                        copy_time = time.time() - copy_start_time
-                        logger.info(f"   ✅ Copy completed in {copy_time:.1f}s")
+                        # Use is_multi_file from data
+                        is_multi_file = item.get('is_multi_file', os.path.isdir(item['ssd_path']))
                         
-                        # Verify copy
-                        if verify_copy(item['ssd_path'], item['hdd_path'], is_multi_file):
-                            logger.info(f"   ✅ Copy verification successful")
-                            
-                            # Add HDD tag after successful copy
-                            client.torrents_add_tags(tags=config.HDD_LOCATION_TAG, torrent_hashes=item['hash'])
-                            logger.info(f"   🏷️  Added '{config.HDD_LOCATION_TAG}' tag to {item['name']}")
-                            successful_operations += 1
-                            
-                        else:
-                            logger.error(f"   ❌ Copy verification failed for {item['name']}")
-                            # Clean up failed copy
-                            try:
-                                if os.path.exists(item['hdd_path']):
-                                    if os.path.isdir(item['hdd_path']):
-                                        shutil.rmtree(item['hdd_path'])
-                                    else:
-                                        os.remove(item['hdd_path'])
-                            except:
-                                pass
-                            failed_operations += 1
-                            
-                    except Exception as copy_e:
-                        logger.error(f"   ❌ Copy failed for {item['name']}: {copy_e}")
-                        failed_operations += 1
+                        # Ensure HDD base directory exists
+                        hdd_base_dir = os.path.dirname(item['hdd_path'])
+                        os.makedirs(hdd_base_dir, exist_ok=True)
                         
-            except Exception as e:
-                logger.error(f"Failed copy operation for {item['name']}: {e}")
-                failed_operations += 1
-        
-        logger.info(f"Enhanced tagging complete: {successful_operations} successful, {failed_operations} failed")
-        
-        return {
-            'dry_run': False,
-            'total_operations': total_operations,
-            'successful': successful_operations,
-            'failed': failed_operations,
-            'ssd_operations': len(ssd_candidates),
-            'hdd_operations': len(hdd_candidates),
-            'copy_operations': len(copy_operations),
-            'untaggable': len(untaggable)
-        }
+                        # Perform copy operation
+                        copy_start_time = time.time()
+                        try:
+                            if is_multi_file:
+                                shutil.copytree(item['ssd_path'], item['hdd_path'], copy_function=shutil.copy2, dirs_exist_ok=True)
+                            else:
+                                shutil.copy2(item['ssd_path'], item['hdd_path'])
+                            
+                            copy_time = time.time() - copy_start_time
+                            logger.info(f"   ✅ Copy completed in {copy_time:.1f}s")
+                            
+                            # Verify copy
+                            if verify_copy(item['ssd_path'], item['hdd_path'], is_multi_file):
+                                logger.info(f"   ✅ Copy verification successful")
+                                
+                                # Add HDD tag after successful copy
+                                client.torrents_add_tags(tags=config.HDD_LOCATION_TAG, torrent_hashes=item['hash'])
+                                logger.info(f"   🏷️  Added '{config.HDD_LOCATION_TAG}' tag to {item['name']}")
+                                copy_successful += 1
+                                
+                            else:
+                                logger.error(f"   ❌ Copy verification failed for {item['name']}")
+                                # Clean up failed copy
+                                try:
+                                    if os.path.exists(item['hdd_path']):
+                                        if os.path.isdir(item['hdd_path']):
+                                            shutil.rmtree(item['hdd_path'])
+                                        else:
+                                            os.remove(item['hdd_path'])
+                                except:
+                                    pass
+                                copy_failed += 1
+                                
+                        except Exception as copy_e:
+                            logger.error(f"   ❌ Copy failed for {item['name']}: {copy_e}")
+                            copy_failed += 1
+                            
+                    except Exception as e:
+                        logger.error(f"Failed copy operation for {item['name']}: {e}")
+                        copy_failed += 1
+                
+                total_successful = successful_operations + copy_successful
+                total_failed = failed_operations + copy_failed
+                
+                logger.info(f"Enhanced tagging complete: {total_successful} successful, {total_failed} failed")
+                
+                return {
+                    'dry_run': False,
+                    'total_operations': total_tag_operations + len(copy_operations),
+                    'successful': total_successful,
+                    'failed': total_failed,
+                    'successful_tags': successful_operations,
+                    'failed_tags': failed_operations,
+                    'successful_copies': copy_successful,
+                    'failed_copies': copy_failed,
+                    'ssd_operations': len(ssd_tag_hashes),
+                    'hdd_operations': len(hdd_tag_hashes),
+                    'copy_operations': len(copy_operations),
+                    'untaggable': len(untaggable)
+                }
+        else:
+            logger.info(f"Bulk tagging complete: {successful_operations} successful, {failed_operations} failed")
+            
+            return {
+                'dry_run': False,
+                'total_tag_operations': total_tag_operations,
+                'successful_tags': successful_operations,
+                'failed_tags': failed_operations,
+                'ssd_operations': len(ssd_tag_hashes),
+                'hdd_operations': len(hdd_tag_hashes),
+                'copy_operations': 0,
+                'untaggable': len(untaggable)
+            }
         
     except Exception as e:
         logger.error(f"Error during torrent tagging: {e}")

@@ -55,7 +55,11 @@ class QbitManagerOrchestrator:
     def __init__(self):
         self.running_processes: Dict[str, ProcessInfo] = {}
         self.process_queue: List[QueueItem] = []
+        # Add copy operation tracking
+        self.running_copy_operations: Dict[str, Dict] = {}
+        self.copy_queue: List[Dict] = []
         self.executor = ThreadPoolExecutor(max_workers=config.MAX_CONCURRENT_PROCESSES)
+        self.copy_executor = ThreadPoolExecutor(max_workers=config.MAX_CONCURRENT_COPY_OPERATIONS if hasattr(config, 'MAX_CONCURRENT_COPY_OPERATIONS') else 2)
         self.qbit_client = None
         self.shutdown_event = threading.Event()
         self.lock = threading.RLock()  # Reentrant lock for thread safety
@@ -67,7 +71,9 @@ class QbitManagerOrchestrator:
             'torrents_processed': 0,
             'space_management_runs': 0,
             'api_requests': 0,
-            'last_activity': time.time()
+            'last_activity': time.time(),
+            'copy_operations_completed': 0,
+            'copy_operations_failed': 0
         }
         
         logger.info("qBittorrent Manager Orchestrator initialized")
@@ -217,10 +223,211 @@ class QbitManagerOrchestrator:
         # Run in thread pool
         self.executor.submit(run_space_management)
     
+    def add_copy_operations(self, copy_operations_list: List[Dict]) -> str:
+        """Add copy operations to the queue for async processing"""
+        with self.lock:
+            if self._shutdown_in_progress:
+                logger.warning("Rejecting copy operations - shutdown in progress")
+                raise RuntimeError("Service is shutting down")
+            
+            batch_id = str(uuid.uuid4())
+            
+            for copy_op in copy_operations_list:
+                copy_op['batch_id'] = batch_id
+                copy_op['queued_time'] = time.time()
+                copy_op['id'] = str(uuid.uuid4())
+                self.copy_queue.append(copy_op)
+            
+            logger.info(f"Added {len(copy_operations_list)} copy operations with batch ID {batch_id}")
+            self._process_copy_queue()
+            return batch_id
+    
+    def _process_copy_queue(self):
+        """Process copy operations from the queue if capacity is available"""
+        with self.lock:
+            max_concurrent = getattr(config, 'MAX_CONCURRENT_COPY_OPERATIONS', 2)
+            while (len(self.running_copy_operations) < max_concurrent 
+                   and self.copy_queue):
+                
+                copy_item = self.copy_queue.pop(0)
+                self._start_copy_operation(copy_item)
+    
+    def _start_copy_operation(self, copy_item: Dict):
+        """Start a copy operation in a background thread"""
+        copy_id = copy_item['id']
+        
+        # Track the running operation
+        self.running_copy_operations[copy_id] = {
+            'id': copy_id,
+            'batch_id': copy_item['batch_id'],
+            'torrent_hash': copy_item['hash'],
+            'torrent_name': copy_item['name'],
+            'start_time': time.time(),
+            'status': ServiceStatus.RUNNING,
+            'ssd_path': copy_item['ssd_path'],
+            'hdd_path': copy_item['hdd_path'],
+            'size': copy_item.get('size', 0)
+        }
+        
+        logger.info(f"Starting copy operation: {copy_item['name']} (Copy ID: {copy_id})")
+        
+        # Submit to copy thread pool
+        future = self.copy_executor.submit(self._copy_worker, copy_item)
+        future.add_done_callback(lambda f: self._on_copy_complete(copy_id, f))
+    
+    def _copy_worker(self, copy_item: Dict):
+        """Worker function that runs copy operations in a background thread"""
+        import shutil
+        import os
+        from util import verify_copy
+        
+        try:
+            logger.info(f"📁 Copying {copy_item['name']} from SSD to HDD...")
+            
+            # Use is_multi_file from data
+            is_multi_file = copy_item.get('is_multi_file', os.path.isdir(copy_item['ssd_path']))
+            
+            # Ensure HDD base directory exists
+            hdd_base_dir = os.path.dirname(copy_item['hdd_path'])
+            os.makedirs(hdd_base_dir, exist_ok=True)
+            
+            # Perform copy operation
+            copy_start_time = time.time()
+            
+            if is_multi_file:
+                shutil.copytree(copy_item['ssd_path'], copy_item['hdd_path'], 
+                              copy_function=shutil.copy2, dirs_exist_ok=True)
+            else:
+                shutil.copy2(copy_item['ssd_path'], copy_item['hdd_path'])
+            
+            copy_time = time.time() - copy_start_time
+            logger.info(f"   ✅ Copy completed in {copy_time:.1f}s")
+            
+            # Verify copy
+            if verify_copy(copy_item['ssd_path'], copy_item['hdd_path'], is_multi_file):
+                logger.info(f"   ✅ Copy verification successful")
+                
+                # Add HDD tag after successful copy
+                client = self.get_qbit_client()
+                import config
+                client.torrents_add_tags(tags=config.HDD_LOCATION_TAG, torrent_hashes=copy_item['hash'])
+                logger.info(f"   🏷️  Added '{config.HDD_LOCATION_TAG}' tag to {copy_item['name']}")
+                
+                return {
+                    'success': True,
+                    'copy_time': copy_time,
+                    'torrent_hash': copy_item['hash'],
+                    'torrent_name': copy_item['name']
+                }
+            else:
+                logger.error(f"   ❌ Copy verification failed for {copy_item['name']}")
+                # Clean up failed copy
+                try:
+                    if os.path.exists(copy_item['hdd_path']):
+                        if os.path.isdir(copy_item['hdd_path']):
+                            shutil.rmtree(copy_item['hdd_path'])
+                        else:
+                            os.remove(copy_item['hdd_path'])
+                except Exception as cleanup_e:
+                    logger.warning(f"Failed to cleanup failed copy: {cleanup_e}")
+                
+                return {
+                    'success': False,
+                    'error': 'Copy verification failed',
+                    'torrent_hash': copy_item['hash'],
+                    'torrent_name': copy_item['name']
+                }
+                
+        except Exception as e:
+            logger.error(f"   ❌ Copy failed for {copy_item['name']}: {e}")
+            return {
+                'success': False,
+                'error': str(e),
+                'torrent_hash': copy_item['hash'],
+                'torrent_name': copy_item['name']
+            }
+    
+    def _on_copy_complete(self, copy_id: str, future):
+        """Callback when a copy operation completes"""
+        with self.lock:
+            if copy_id not in self.running_copy_operations:
+                return
+            
+            copy_info = self.running_copy_operations[copy_id]
+            
+            try:
+                result = future.result()
+                copy_info['status'] = ServiceStatus.COMPLETED if result['success'] else ServiceStatus.FAILED
+                copy_info['result'] = result
+                copy_info['end_time'] = time.time()
+                copy_info['duration'] = copy_info['end_time'] - copy_info['start_time']
+                
+                if result['success']:
+                    self.stats['copy_operations_completed'] += 1
+                    logger.info(f"Copy operation completed: {result['torrent_name']}")
+                else:
+                    self.stats['copy_operations_failed'] += 1
+                    logger.error(f"Copy operation failed: {result.get('torrent_name', 'unknown')}")
+                    
+            except Exception as e:
+                copy_info['status'] = ServiceStatus.FAILED
+                copy_info['result'] = {'success': False, 'error': str(e)}
+                copy_info['end_time'] = time.time()
+                copy_info['duration'] = copy_info['end_time'] - copy_info['start_time']
+                self.stats['copy_operations_failed'] += 1
+                logger.error(f"Exception in copy operation: {e}")
+            
+            # Clean up old completed copy operations (keep last 20)
+            completed_copies = [p for p in self.running_copy_operations.values() 
+                              if p['status'] in [ServiceStatus.COMPLETED, ServiceStatus.FAILED]]
+            if len(completed_copies) > 20:
+                oldest_completed = sorted(completed_copies, key=lambda x: x['start_time'])[:-20]
+                for old_copy in oldest_completed:
+                    del self.running_copy_operations[old_copy['id']]
+            
+            # Process next copy in queue
+            self._process_copy_queue()
+            self.stats['last_activity'] = time.time()
+    
+    def get_copy_operations_status(self, batch_id: str = None) -> Dict:
+        """Get status of copy operations, optionally filtered by batch ID"""
+        with self.lock:
+            if batch_id:
+                # Filter by batch ID
+                operations = [op for op in self.running_copy_operations.values() 
+                            if op.get('batch_id') == batch_id]
+                queue_items = [op for op in self.copy_queue if op.get('batch_id') == batch_id]
+            else:
+                # All operations
+                operations = list(self.running_copy_operations.values())
+                queue_items = self.copy_queue.copy()
+            
+            return {
+                'batch_id': batch_id,
+                'running_operations': len([op for op in operations if op['status'] == ServiceStatus.RUNNING]),
+                'completed_operations': len([op for op in operations if op['status'] == ServiceStatus.COMPLETED]),
+                'failed_operations': len([op for op in operations if op['status'] == ServiceStatus.FAILED]),
+                'queued_operations': len(queue_items),
+                'operations': [
+                    {
+                        'id': op['id'],
+                        'batch_id': op.get('batch_id'),
+                        'torrent_hash': op['torrent_hash'],
+                        'torrent_name': op['torrent_name'],
+                        'status': op['status'].value,
+                        'start_time': datetime.fromtimestamp(op['start_time']).isoformat(),
+                        'duration_seconds': op.get('duration', time.time() - op['start_time']),
+                        'size_gb': f"{op.get('size', 0) / (1024**3):.2f}" if op.get('size') else "Unknown"
+                    }
+                    for op in operations
+                ]
+            }
+    
     def get_status(self) -> Dict:
         """Get current orchestrator status"""
         with self.lock:
             uptime = time.time() - self.stats['service_start_time']
+            max_copy_concurrent = getattr(config, 'MAX_CONCURRENT_COPY_OPERATIONS', 2)
             
             return {
                 'service': {
@@ -234,6 +441,12 @@ class QbitManagerOrchestrator:
                     'max_concurrent': config.MAX_CONCURRENT_PROCESSES,
                     'queue_size': len(self.process_queue),
                     'capacity_available': config.MAX_CONCURRENT_PROCESSES - len(self.running_processes)
+                },
+                'copy_operations': {
+                    'running_copies': len(self.running_copy_operations),
+                    'max_concurrent_copies': max_copy_concurrent,
+                    'copy_queue_size': len(self.copy_queue),
+                    'copy_capacity_available': max_copy_concurrent - len(self.running_copy_operations)
                 },
                 'statistics': self.stats.copy(),
                 'processes': [
@@ -271,26 +484,29 @@ class QbitManagerOrchestrator:
             self._save_current_state()
         
         # Wait for running processes to complete (with timeout)
-        if self.running_processes:
-            logger.info(f"Waiting for {len(self.running_processes)} processes to complete...")
-            logger.info("Processes will be restored on next startup if interrupted")
+        total_operations = len(self.running_processes) + len(self.running_copy_operations)
+        if total_operations > 0:
+            logger.info(f"Waiting for {len(self.running_processes)} torrent processes and {len(self.running_copy_operations)} copy operations to complete...")
+            logger.info("Operations will be restored on next startup if interrupted")
             
-            # Give processes time to complete, but don't wait indefinitely
+            # Give operations time to complete, but don't wait indefinitely
             start_time = time.time()
             timeout = 30  # 30 seconds
             
-            while self.running_processes and (time.time() - start_time) < timeout:
+            while (self.running_processes or self.running_copy_operations) and (time.time() - start_time) < timeout:
                 time.sleep(1)
-                # Check if any processes completed
-                completed = [p for p in self.running_processes.values() if p.status != ServiceStatus.RUNNING]
-                if completed:
-                    logger.info(f"{len(completed)} processes completed during shutdown")
+                # Check if any operations completed
+                completed_processes = [p for p in self.running_processes.values() if p.status != ServiceStatus.RUNNING]
+                completed_copies = [p for p in self.running_copy_operations.values() if p['status'] != ServiceStatus.RUNNING]
+                if completed_processes or completed_copies:
+                    logger.info(f"{len(completed_processes)} processes and {len(completed_copies)} copy operations completed during shutdown")
             
-            # Force shutdown executor
+            # Force shutdown executors
             self.executor.shutdown(wait=False, timeout=5)
+            self.copy_executor.shutdown(wait=False, timeout=5)
             
-            if self.running_processes:
-                logger.warning(f"{len(self.running_processes)} processes were interrupted and will be restored on restart")
+            if self.running_processes or self.running_copy_operations:
+                logger.warning(f"{len(self.running_processes)} processes and {len(self.running_copy_operations)} copy operations were interrupted and will be restored on restart")
         
         # Close qBittorrent client
         if self.qbit_client:
@@ -447,15 +663,34 @@ async def tag_existing_endpoint(request):
         dry_run = data.get('dry_run', False)
         
         client = orchestrator.get_qbit_client()
-        result = tag_existing_torrents_by_location(client, dry_run=dry_run)
+        # Use async_copies=True to prevent blocking on copy operations
+        result = tag_existing_torrents_by_location(client, dry_run=dry_run, async_copies=True)
         
         if 'error' in result:
             return web.json_response({'error': result['error']}, status=500)
         
-        return web.json_response({
+        # Handle copy operations asynchronously if not dry run
+        copy_batch_id = None
+        if not dry_run and 'copy_operations_list' in result and result['copy_operations_list']:
+            try:
+                copy_batch_id = orchestrator.add_copy_operations(result['copy_operations_list'])
+                logger.info(f"Queued {len(result['copy_operations_list'])} copy operations with batch ID: {copy_batch_id}")
+            except Exception as copy_e:
+                logger.error(f"Failed to queue copy operations: {copy_e}")
+                # Don't fail the entire request if copy queueing fails
+                copy_batch_id = None
+        
+        response_data = {
             'success': True,
             'result': result
-        })
+        }
+        
+        # Add copy batch ID if copy operations were queued
+        if copy_batch_id:
+            response_data['copy_batch_id'] = copy_batch_id
+            response_data['message'] = f"Tagging completed. Copy operations queued with batch ID: {copy_batch_id}"
+        
+        return web.json_response(response_data)
         
     except Exception as e:
         logger.error(f"Error in tag existing endpoint: {e}")
@@ -491,6 +726,21 @@ async def save_state_endpoint(request):
         logger.error(f"Error saving state: {e}")
         return web.json_response({'error': str(e)}, status=500)
 
+async def copy_operations_status_endpoint(request):
+    """Get status of copy operations"""
+    try:
+        batch_id = request.query.get('batch_id')
+        result = orchestrator.get_copy_operations_status(batch_id)
+        
+        return web.json_response({
+            'success': True,
+            'copy_status': result
+        })
+        
+    except Exception as e:
+        logger.error(f"Error getting copy operations status: {e}")
+        return web.json_response({'error': str(e)}, status=500)
+
 def create_app():
     """Create and configure the web application"""
     app = web.Application(middlewares=[auth_middleware])
@@ -504,6 +754,7 @@ def create_app():
     app.router.add_post('/tags/existing', tag_existing_endpoint)
     app.router.add_get('/tags/summary', tag_summary_endpoint)
     app.router.add_post('/state/save', save_state_endpoint)
+    app.router.add_get('/copy-operations/status', copy_operations_status_endpoint)
     
     return app
 
@@ -525,6 +776,7 @@ async def start_service():
     logger.info("  POST /tags/existing - Tag existing torrents")
     logger.info("  GET  /tags/summary - Get tag summary")
     logger.info("  POST /state/save - Manually save state")
+    logger.info("  GET  /copy-operations/status - Get copy operations status")
     logger.info(f"Authentication: X-API-Key header or api_key query parameter required")
     
     # Set up graceful shutdown
