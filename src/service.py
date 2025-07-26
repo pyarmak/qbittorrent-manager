@@ -59,7 +59,7 @@ class QbitManagerOrchestrator:
         self.running_copy_operations: Dict[str, Dict] = {}
         self.copy_queue: List[Dict] = []
         self.executor = ThreadPoolExecutor(max_workers=config.MAX_CONCURRENT_PROCESSES)
-        self.copy_executor = ThreadPoolExecutor(max_workers=config.MAX_CONCURRENT_COPY_OPERATIONS if hasattr(config, 'MAX_CONCURRENT_COPY_OPERATIONS') else 2)
+        self.copy_executor = ThreadPoolExecutor(max_workers=config.MAX_CONCURRENT_COPY_OPERATIONS)
         self.qbit_client = None
         self.shutdown_event = threading.Event()
         self.lock = threading.RLock()  # Reentrant lock for thread safety
@@ -245,7 +245,7 @@ class QbitManagerOrchestrator:
     def _process_copy_queue(self):
         """Process copy operations from the queue if capacity is available"""
         with self.lock:
-            max_concurrent = getattr(config, 'MAX_CONCURRENT_COPY_OPERATIONS', 2)
+            max_concurrent = config.MAX_CONCURRENT_COPY_OPERATIONS
             while (len(self.running_copy_operations) < max_concurrent 
                    and self.copy_queue):
                 
@@ -281,6 +281,16 @@ class QbitManagerOrchestrator:
         import os
         from util import verify_copy
         
+        # Set process priority to lower CPU usage (if supported)
+        try:
+            import psutil
+            process = psutil.Process(os.getpid())
+            process.nice(config.COPY_OPERATION_NICE_LEVEL)
+            logger.debug(f"Set copy process nice level to {config.COPY_OPERATION_NICE_LEVEL}")
+        except (ImportError, AttributeError, OSError):
+            # psutil not available or nice not supported on this platform
+            pass
+        
         try:
             logger.info(f"📁 Copying {copy_item['name']} from SSD to HDD...")
             
@@ -291,14 +301,16 @@ class QbitManagerOrchestrator:
             hdd_base_dir = os.path.dirname(copy_item['hdd_path'])
             os.makedirs(hdd_base_dir, exist_ok=True)
             
-            # Perform copy operation
+            # Perform copy operation with performance optimizations
             copy_start_time = time.time()
             
             if is_multi_file:
+                # Use optimized copy function for directories
                 shutil.copytree(copy_item['ssd_path'], copy_item['hdd_path'], 
-                              copy_function=shutil.copy2, dirs_exist_ok=True)
+                              copy_function=self._optimized_copy_file, dirs_exist_ok=True)
             else:
-                shutil.copy2(copy_item['ssd_path'], copy_item['hdd_path'])
+                # Use optimized copy for single files
+                self._optimized_copy_file(copy_item['ssd_path'], copy_item['hdd_path'])
             
             copy_time = time.time() - copy_start_time
             logger.info(f"   ✅ Copy completed in {copy_time:.1f}s")
@@ -346,6 +358,24 @@ class QbitManagerOrchestrator:
                 'torrent_hash': copy_item['hash'],
                 'torrent_name': copy_item['name']
             }
+    
+    def _optimized_copy_file(self, src: str, dst: str):
+        """Optimized file copy with configurable buffer size"""
+        import shutil
+        
+        # Use larger buffer size for better I/O performance
+        buffer_size = config.COPY_BUFFER_SIZE
+        
+        # Copy file with optimized buffer size
+        with open(src, 'rb') as fsrc, open(dst, 'wb') as fdst:
+            while True:
+                buf = fsrc.read(buffer_size)
+                if not buf:
+                    break
+                fdst.write(buf)
+        
+        # Copy metadata (timestamps, permissions)
+        shutil.copystat(src, dst)
     
     def _on_copy_complete(self, copy_id: str, future):
         """Callback when a copy operation completes"""
@@ -427,7 +457,7 @@ class QbitManagerOrchestrator:
         """Get current orchestrator status"""
         with self.lock:
             uptime = time.time() - self.stats['service_start_time']
-            max_copy_concurrent = getattr(config, 'MAX_CONCURRENT_COPY_OPERATIONS', 2)
+            max_copy_concurrent = config.MAX_CONCURRENT_COPY_OPERATIONS
             
             return {
                 'service': {

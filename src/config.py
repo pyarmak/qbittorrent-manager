@@ -137,6 +137,11 @@ DISK_SPACE_THRESHOLD_GB = get_env_override('DISK_SPACE_THRESHOLD_GB', 'processin
 COPY_RETRY_ATTEMPTS = get_env_override('COPY_RETRY_ATTEMPTS', 'processing.copy.retry_attempts', 3, int)
 VERIFICATION_ENABLED = get_env_override('VERIFICATION_ENABLED', 'processing.copy.verification_enabled', True, bool)
 
+# --- Performance Configuration ---
+MAX_CONCURRENT_COPY_OPERATIONS = get_env_override('MAX_CONCURRENT_COPY_OPERATIONS', 'performance.max_concurrent_copy_operations', 1, int)
+COPY_OPERATION_NICE_LEVEL = get_env_override('COPY_OPERATION_NICE_LEVEL', 'performance.copy_operation_nice_level', 10, int)
+COPY_BUFFER_SIZE = get_env_override('COPY_BUFFER_SIZE', 'performance.copy_buffer_size', 1048576, int)
+
 # --- Notification Configuration ---
 NOTIFY_ARR_ENABLED = get_env_override('NOTIFY_ARR_ENABLED', 'notifications.enabled', True, bool)
 
