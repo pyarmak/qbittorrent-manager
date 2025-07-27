@@ -70,6 +70,8 @@ class ProcessInfo:
     start_time: float
     status: ServiceStatus
     result: Optional[Dict] = None
+    end_time: Optional[float] = None
+    duration: Optional[float] = None
 
 @dataclass
 class QueueItem:

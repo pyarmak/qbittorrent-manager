@@ -53,7 +53,7 @@ class QbitManagerOrchestrator:
     """
     
     def __init__(self):
-        self.running_processes: Dict[str, ProcessInfo] = {}
+        self.processes: Dict[str, ProcessInfo] = {}  # Contains both running and completed processes (last 10 completed kept for monitoring)
         self.process_queue: List[QueueItem] = []
         # Add copy operation tracking
         self.running_copy_operations: Dict[str, Dict] = {}
@@ -121,11 +121,14 @@ class QbitManagerOrchestrator:
     def _process_queue(self):
         """Process items from the queue if capacity is available"""
         with self.lock:
-            while (len(self.running_processes) < config.MAX_CONCURRENT_PROCESSES 
+            # Only count actually running processes for concurrency limit
+            running_count = len([p for p in self.processes.values() if p.status == ServiceStatus.RUNNING])
+            while (running_count < config.MAX_CONCURRENT_PROCESSES 
                    and self.process_queue):
                 
                 item = self.process_queue.pop(0)
                 self._start_torrent_processing(item)
+                running_count += 1
             
             # Trigger space management after successful processing if queue is empty
             if not self.process_queue:
@@ -141,7 +144,7 @@ class QbitManagerOrchestrator:
             status=ServiceStatus.RUNNING
         )
         
-        self.running_processes[process_id] = process_info
+        self.processes[process_id] = process_info
         
         logger.info(f"Starting torrent processing: {queue_item.torrent.hash} (Process ID: {process_id})")
         
@@ -171,15 +174,17 @@ class QbitManagerOrchestrator:
     def _on_process_complete(self, process_id: str, future):
         """Callback when a torrent processing task completes"""
         with self.lock:
-            if process_id not in self.running_processes:
+            if process_id not in self.processes:
                 return
             
-            process_info = self.running_processes[process_id]
+            process_info = self.processes[process_id]
             
             try:
                 result = future.result()
                 process_info.status = ServiceStatus.COMPLETED if result['success'] else ServiceStatus.FAILED
                 process_info.result = result
+                process_info.end_time = time.time()
+                process_info.duration = process_info.end_time - process_info.start_time
                 
                 if result['success']:
                     self.stats['torrents_processed'] += 1
@@ -190,15 +195,17 @@ class QbitManagerOrchestrator:
             except Exception as e:
                 process_info.status = ServiceStatus.FAILED
                 process_info.result = {'success': False, 'error': str(e)}
+                process_info.end_time = time.time()
+                process_info.duration = process_info.end_time - process_info.start_time
                 logger.error(f"Exception in torrent processing: {e}")
             
-            # Clean up old completed processes (keep last 10)
-            completed_processes = [p for p in self.running_processes.values() 
+            # Clean up old completed processes (keep last 10 for monitoring/debugging)
+            completed_processes = [p for p in self.processes.values() 
                                  if p.status in [ServiceStatus.COMPLETED, ServiceStatus.FAILED]]
             if len(completed_processes) > 10:
                 oldest_completed = sorted(completed_processes, key=lambda x: x.start_time)[:-10]
                 for old_process in oldest_completed:
-                    del self.running_processes[old_process.id]
+                    del self.processes[old_process.id]
             
             # Process next item in queue
             self._process_queue()
@@ -467,10 +474,11 @@ class QbitManagerOrchestrator:
                     'last_activity': datetime.fromtimestamp(self.stats['last_activity']).isoformat()
                 },
                 'processing': {
-                    'running_processes': len(self.running_processes),
+                    'running_processes': len([p for p in self.processes.values() if p.status == ServiceStatus.RUNNING]),
+                    'total_processes': len(self.processes),
                     'max_concurrent': config.MAX_CONCURRENT_PROCESSES,
                     'queue_size': len(self.process_queue),
-                    'capacity_available': config.MAX_CONCURRENT_PROCESSES - len(self.running_processes)
+                    'capacity_available': config.MAX_CONCURRENT_PROCESSES - len([p for p in self.processes.values() if p.status == ServiceStatus.RUNNING])
                 },
                 'copy_operations': {
                     'running_copies': len(self.running_copy_operations),
@@ -485,9 +493,9 @@ class QbitManagerOrchestrator:
                         'torrent_hash': p.torrent_hash,
                         'status': p.status.value,
                         'start_time': datetime.fromtimestamp(p.start_time).isoformat(),
-                        'duration_seconds': time.time() - p.start_time
+                        'duration_seconds': p.duration if p.duration is not None else (time.time() - p.start_time)
                     }
-                    for p in self.running_processes.values()
+                    for p in self.processes.values()
                 ]
             }
     
@@ -514,29 +522,33 @@ class QbitManagerOrchestrator:
             self._save_current_state()
         
         # Wait for running processes to complete (with timeout)
-        total_operations = len(self.running_processes) + len(self.running_copy_operations)
+        running_processes_count = len([p for p in self.processes.values() if p.status == ServiceStatus.RUNNING])
+        running_copies_count = len([p for p in self.running_copy_operations.values() if p['status'] == ServiceStatus.RUNNING])
+        total_operations = running_processes_count + running_copies_count
         if total_operations > 0:
-            logger.info(f"Waiting for {len(self.running_processes)} torrent processes and {len(self.running_copy_operations)} copy operations to complete...")
+            logger.info(f"Waiting for {running_processes_count} torrent processes and {running_copies_count} copy operations to complete...")
             logger.info("Operations will be restored on next startup if interrupted")
             
             # Give operations time to complete, but don't wait indefinitely
             start_time = time.time()
             timeout = 30  # 30 seconds
             
-            while (self.running_processes or self.running_copy_operations) and (time.time() - start_time) < timeout:
+            running_processes = [p for p in self.processes.values() if p.status == ServiceStatus.RUNNING]
+            running_copies = [p for p in self.running_copy_operations.values() if p['status'] == ServiceStatus.RUNNING]
+            while (running_processes or running_copies) and (time.time() - start_time) < timeout:
                 time.sleep(1)
                 # Check if any operations completed
-                completed_processes = [p for p in self.running_processes.values() if p.status != ServiceStatus.RUNNING]
-                completed_copies = [p for p in self.running_copy_operations.values() if p['status'] != ServiceStatus.RUNNING]
-                if completed_processes or completed_copies:
-                    logger.info(f"{len(completed_processes)} processes and {len(completed_copies)} copy operations completed during shutdown")
+                running_processes = [p for p in self.processes.values() if p.status == ServiceStatus.RUNNING]
+                running_copies = [p for p in self.running_copy_operations.values() if p['status'] == ServiceStatus.RUNNING]
             
             # Force shutdown executors
             self.executor.shutdown(wait=False, timeout=5)
             self.copy_executor.shutdown(wait=False, timeout=5)
             
-            if self.running_processes or self.running_copy_operations:
-                logger.warning(f"{len(self.running_processes)} processes and {len(self.running_copy_operations)} copy operations were interrupted and will be restored on restart")
+            running_processes = [p for p in self.processes.values() if p.status == ServiceStatus.RUNNING]
+            running_copies = [p for p in self.running_copy_operations.values() if p['status'] == ServiceStatus.RUNNING]
+            if running_processes or running_copies:
+                logger.warning(f"{len(running_processes)} processes and {len(running_copies)} copy operations were interrupted and will be restored on restart")
         
         # Close qBittorrent client
         if self.qbit_client:
