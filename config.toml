@@ -1,0 +1,29 @@
+
+[general]
+dry_run = false
+
+[qbittorrent]
+host = "localhost"
+port = 8080
+username = "admin"
+password = "test-password"
+
+[http_service]
+enabled = true
+host = "127.0.0.1"
+port = 8081
+api_key = "test-key-for-validation"
+
+[paths.downloads]
+ssd = "/downloads/ssd"
+hdd = "/downloads/hdd"
+
+# Performance optimization settings
+[performance]
+# Limit concurrent copy operations to prevent I/O contention
+# Recommended: 1 for mechanical HDDs, 2-3 for SSDs/NVMe
+max_concurrent_copy_operations = 1
+
+# Optional: Copy operation priorities and scheduling
+copy_operation_nice_level = 10  # Lower CPU priority for copy operations
+copy_buffer_size = 1048576      # 1MB buffer size for more efficient I/O
