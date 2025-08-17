@@ -42,6 +42,8 @@ class PersistedProcessInfo:
     start_time: float
     status: str
     result: Optional[Dict] = None
+    end_time: Optional[float] = None
+    duration: Optional[float] = None
 
 @dataclass
 class ServiceState:
@@ -86,14 +88,16 @@ def save_orchestrator_state(orchestrator):
             # Convert running processes to serializable format
             # Only persist processes that are still running (not completed/failed)
             running_processes = []
-            for process in orchestrator.running_processes.values():
+            for process in orchestrator.processes.values():
                 if process.status.value == 'running':  # Use .value for enum
                     persisted_process = PersistedProcessInfo(
                         id=process.id,
                         torrent_hash=process.torrent_hash,
                         start_time=process.start_time,
                         status=process.status.value,  # Serialize enum value
-                        result=process.result
+                        result=process.result,
+                        end_time=process.end_time,
+                        duration=process.duration
                     )
                     running_processes.append(persisted_process)
             
