@@ -343,21 +343,27 @@ def process_single_torrent_optimized(client: 'QBittorrentClient', torrent_info: 
 
     # 5. Notification Phase (only if copy was successfully verified)
     if copy_verified:
-        logger.info("Copy successful and verified. Notifying Arr service...")
-        
         # Add HDD location tag while keeping SSD tag (dual-location tracking)
         add_hdd_tag(client, torrent_info.hash)
         
-        service_to_notify = None
-        # Determine which service to notify based on tag (using config tags)
-        if category.lower() == config.SONARR_TAG.lower(): service_to_notify = "sonarr"
-        elif category.lower() == config.RADARR_TAG.lower(): service_to_notify = "radarr"
-        else: logger.info(f"Tag '{category}' does not match Sonarr/Radarr tags. Skipping notification.")
+        if config.ENABLE_IMPORT_SCRIPT_MODE:
+            # In import script mode, Sonarr/Radarr handle their own import via the script
+            # We just need to ensure the background copy is complete
+            logger.info("Copy successful and verified. Import script mode - no notification needed.")
+        else:
+            # Normal mode - notify Sonarr/Radarr to scan for the completed download
+            logger.info("Copy successful and verified. Notifying Arr service...")
+            
+            service_to_notify = None
+            # Determine which service to notify based on tag (using config tags)
+            if category.lower() == config.SONARR_TAG.lower(): service_to_notify = "sonarr"
+            elif category.lower() == config.RADARR_TAG.lower(): service_to_notify = "radarr"
+            else: logger.info(f"Tag '{category}' does not match Sonarr/Radarr tags. Skipping notification.")
 
-        # If a matching service was found, send the notification
-        if service_to_notify:
-            # Call notify_arr_scan_downloads, passing the config dict
-            notify_arr_scan_downloads(service_to_notify, torrent_info.hash, config.ARR_CONFIG, hdd_data_path)
+            # If a matching service was found, send the notification
+            if service_to_notify:
+                # Call notify_arr_scan_downloads, passing the config dict
+                notify_arr_scan_downloads(service_to_notify, torrent_info.hash, config.ARR_CONFIG, hdd_data_path)
 
         logger.info(f"--- Successfully processed (OPTIMIZED): {torrent_info.hash} ---")
         success = True
@@ -504,8 +510,33 @@ def manage_ssd_space(client: 'QBittorrentClient'):
         if space_freed_gb >= space_needed: 
             logger.info(f"Successfully freed {space_freed_gb:.2f} GB.")
             break
-        # Call the relocation function, passing TorrentInfo object
-        if relocate_and_delete_ssd(client, info["torrent_info"], config.FINAL_DEST_BASE_HDD, config.DOWNLOAD_PATH_SSD):
+        
+        # Try import script mode relocation first, then fallback to normal relocation
+        relocation_success = False
+        
+        if config.ENABLE_IMPORT_SCRIPT_MODE:
+            success, reason = relocate_and_delete_ssd_import_script_mode(
+                client, info["torrent_info"], config.FINAL_DEST_BASE_HDD, config.DOWNLOAD_PATH_SSD
+            )
+            
+            if success:
+                relocation_success = True
+            elif reason in ["streaming", "no_symlinks", "no_hdd_copy", "no_config"]:
+                # These are "skip this torrent" conditions, not failures
+                logger.info(f"Skipping torrent {info['torrent_info'].hash}: {reason}")
+                continue  # Skip to next torrent without trying fallback
+            else:
+                # reason == "error" or other actual failure - try fallback
+                logger.warning(f"Import script mode failed ({reason}), trying fallback for {info['torrent_info'].hash}")
+                relocation_success = False
+        
+        # Fallback to normal relocation if import script mode failed with an error or is disabled
+        if not relocation_success:
+            relocation_success = relocate_and_delete_ssd(
+                client, info["torrent_info"], config.FINAL_DEST_BASE_HDD, config.DOWNLOAD_PATH_SSD
+            )
+        
+        if relocation_success:
             space_freed_gb += info["size"]; relocated_count += 1
         else: 
             logger.error(f"Stopping relocation process due to failure on {info['torrent_info'].hash}.")
@@ -514,5 +545,181 @@ def manage_ssd_space(client: 'QBittorrentClient'):
     logger.info(f"Space Management Summary: Relocated {relocated_count} older torrent(s), freeing approx {space_freed_gb:.2f} GB.")
     final_available_space = available_gb + space_freed_gb
     logger.info(f"Estimated available SSD space is now {final_available_space:.2f} GB.")
+
+def relocate_and_delete_ssd_import_script_mode(client: 'QBittorrentClient', torrent_info: 'TorrentInfo', 
+                                              final_dest_base_hdd: str, download_path_ssd: str) -> tuple[bool, str]:
+    """
+    Enhanced relocation function for import script mode with Tautulli streaming checks
+    and symlink→hardlink replacement.
+    
+    Args:
+        client: qBittorrent client
+        torrent_info: Torrent information
+        final_dest_base_hdd: HDD base directory
+        download_path_ssd: SSD download path
+    
+    Returns:
+        tuple[bool, str]: (success, reason)
+        - (True, "success"): Successfully relocated and deleted
+        - (False, "streaming"): Files currently streaming, skip this torrent
+        - (False, "no_symlinks"): No symlinks found, skip this torrent  
+        - (False, "no_hdd_copy"): HDD copy missing/invalid, skip this torrent
+        - (False, "error"): Actual failure, could try fallback
+    """
+    if not config.ENABLE_IMPORT_SCRIPT_MODE:
+        return False, "disabled"
+    
+    logger.info(f"--- Import script mode relocation for {torrent_info.hash} ---")
+    
+    try:
+        # Step 1: Check if any files are currently streaming
+        from tautulli import get_streaming_status_for_directory
+        
+        streaming_status = get_streaming_status_for_directory(
+            torrent_info.path, 
+            config.TAUTULLI_URL, 
+            config.TAUTULLI_API_KEY
+        )
+        
+        if streaming_status.get('is_any_file_streaming', False):
+            streaming_files = streaming_status.get('streaming_files', [])
+            logger.info(f"⏸️  Skipping relocation - files currently streaming: {len(streaming_files)} files")
+            for file_path in streaming_files:
+                logger.info(f"   📺 Streaming: {os.path.basename(file_path)}")
+            return False, "streaming"
+        
+        logger.info("✅ No streaming activity detected, proceeding with relocation")
+        
+        # Step 2: Find symlinks that need to be replaced
+        all_root_folders = []
+        if config.SONARR_ROOT_FOLDERS:
+            all_root_folders.extend(config.SONARR_ROOT_FOLDERS)
+        if config.RADARR_ROOT_FOLDERS:
+            all_root_folders.extend(config.RADARR_ROOT_FOLDERS)
+        
+        if not all_root_folders:
+            logger.warning("No root folders configured for symlink discovery")
+            return False, "no_config"
+        
+        # Find symlinks pointing to this torrent's SSD path
+        from symlink_utils import find_symlinks_to_ssd_path
+        
+        try:
+            # Try using the find command first (more efficient)
+            symlinks_to_replace = find_symlinks_to_ssd_path(torrent_info.path, all_root_folders)
+        except Exception as e:
+            logger.warning(f"Find command failed, falling back to Python implementation: {e}")
+            # Fallback to Python implementation
+            from symlink_utils import find_symlinks_to_ssd_path_python
+            symlinks_to_replace = find_symlinks_to_ssd_path_python(torrent_info.path, all_root_folders)
+        
+        if not symlinks_to_replace:
+            logger.warning(f"No symlinks found for torrent {torrent_info.hash}, skipping relocation")
+            return False, "no_symlinks"
+        
+        logger.info(f"Found {len(symlinks_to_replace)} symlink(s) to replace")
+        
+        # Step 3: Verify HDD copy exists and is valid
+        hdd_base_dir = os.path.join(final_dest_base_hdd, torrent_info.category)
+        expected_hdd_path = os.path.join(hdd_base_dir, torrent_info.name.strip())
+        
+        if not os.path.exists(expected_hdd_path):
+            logger.warning(f"HDD copy doesn't exist at {expected_hdd_path}")
+            logger.info("HDD copy missing, skipping import script mode relocation")
+            return False, "no_hdd_copy"
+        
+        # Verify HDD copy integrity
+        from util import verify_copy
+        if not verify_copy(torrent_info.path, expected_hdd_path, torrent_info.is_multi_file):
+            logger.error("HDD copy verification failed. Skipping import script mode relocation.")
+            return False, "no_hdd_copy"
+        
+        logger.info("✅ HDD copy verified successfully")
+        
+        # Step 4: Replace symlinks with hardlinks
+        from symlink_utils import replace_symlinks_with_hardlinks
+        
+        replaced_count = replace_symlinks_with_hardlinks(
+            symlinks_to_replace, 
+            torrent_info.path, 
+            expected_hdd_path
+        )
+        
+        if replaced_count == 0:
+            logger.error("Failed to replace any symlinks with hardlinks")
+            return False, "error"
+        
+        logger.info(f"✅ Replaced {replaced_count} symlink(s) with hardlink(s)")
+        
+        # Step 5: Update torrent location in qBittorrent
+        was_started = False
+        try:
+            # Get current torrent state
+            torrent = get_torrent_by_hash(client, str(torrent_info.hash))
+            
+            # Pause if running
+            if torrent.state in ['downloading', 'uploading', 'stalledDL', 'stalledUP', 'queuedDL', 'queuedUP', 'checkingDL', 'checkingUP', 'forcedDL', 'forcedUP']:
+                logger.info("Pausing torrent for location update...")
+                was_started = True
+                client.torrents_pause(torrent_hashes=str(torrent_info.hash))
+                time.sleep(1)
+            
+            # Update torrent location
+            logger.info(f"Updating torrent location to: {hdd_base_dir}")
+            client.torrents_set_location(location=hdd_base_dir, torrent_hashes=str(torrent_info.hash))
+            time.sleep(0.5)
+            
+        except Exception as e:
+            logger.error(f"Failed to update torrent location: {e}")
+            if was_started:
+                try:
+                    client.torrents_resume(torrent_hashes=str(torrent_info.hash))
+                except:
+                    pass
+            return False, "error"
+        
+        # Step 6: Delete SSD data with safety checks
+        deletion_success = False
+        try:
+            # Safety check - ensure path is within SSD download directory
+            norm_ssd_dl_path = os.path.normpath(os.path.realpath(download_path_ssd))
+            norm_ssd_data_path = os.path.normpath(os.path.realpath(torrent_info.path))
+            
+            if os.path.commonpath([norm_ssd_data_path, norm_ssd_dl_path]) != norm_ssd_dl_path:
+                logger.error(f"SAFETY ERROR: Path '{norm_ssd_data_path}' not within '{norm_ssd_dl_path}'. Aborting delete.")
+                return False, "error"
+            
+            # Delete SSD data
+            if os.path.exists(torrent_info.path):
+                if os.path.isdir(torrent_info.path):
+                    shutil.rmtree(torrent_info.path)
+                    logger.info(f"✅ Deleted SSD directory: {torrent_info.path}")
+                else:
+                    os.remove(torrent_info.path)
+                    logger.info(f"✅ Deleted SSD file: {torrent_info.path}")
+                deletion_success = True
+            else:
+                logger.info("SSD data already removed")
+                deletion_success = True
+                
+        except OSError as e:
+            logger.error(f"❌ Failed to delete SSD data: {e}")
+            deletion_success = False
+        
+        # Step 7: Update tags and resume torrent
+        if deletion_success:
+            remove_ssd_tag(client, torrent_info.hash)
+            
+            if was_started:
+                logger.info("Resuming torrent...")
+                client.torrents_resume(torrent_hashes=str(torrent_info.hash))
+        
+        logger.info(f"--- Import script mode relocation completed for {torrent_info.hash} ---")
+        return deletion_success, "success" if deletion_success else "error"
+        
+    except Exception as e:
+        logger.error(f"Error in import script mode relocation: {e}")
+        return False, "error"
+
 # ===================================================================
 

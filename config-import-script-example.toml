@@ -1,0 +1,113 @@
+# Example qBittorrent Manager Configuration for Import Script Mode
+# This configuration enables the new import script approach where Sonarr/Radarr
+# handle their own imports via the provided script, and qbit-manager handles
+# background copying and smart space management with streaming checks.
+
+[general]
+timezone = "America/New_York"
+puid = 1000
+pgid = 1000
+log_level = "INFO"
+dry_run = false
+
+[paths]
+[paths.downloads]
+# SSD cache for fast downloads
+ssd = "/downloads/ssd"
+# HDD for long-term storage
+hdd = "/downloads/hdd"
+
+[paths.config]
+base = "/config"
+logs = "/config/log"
+state = "/config/qbit-manager-state"
+
+[qbittorrent]
+host = "qbittorrent"
+port = 8080
+username = "admin"
+password = "your-qbit-password"
+verify_ssl = false
+
+[http_service]
+enabled = true
+host = "0.0.0.0"
+port = 8081
+api_key = "your-secure-random-api-key-here"
+
+[processing]
+[processing.concurrency]
+max_concurrent = 3
+
+[processing.storage]
+threshold_gb = 100
+
+[processing.copy]
+retry_attempts = 3
+verification_enabled = true
+
+[notifications]
+enabled = false  # Disabled in import script mode - Sonarr/Radarr handle their own imports
+
+[notifications.sonarr]
+url = "http://sonarr:8989"
+api_key = "your-sonarr-api-key-here"
+tag = "sonarr"
+
+[notifications.radarr]
+url = "http://radarr:7878"
+api_key = "your-radarr-api-key-here"
+tag = "radarr"
+
+[storage_tags]
+enabled = true
+auto_tag_new = true
+ssd_tag = "ssd"
+hdd_tag = "hdd"
+
+# ===================================================================
+# NEW: Import Script Mode Configuration
+# ===================================================================
+
+[import_script]
+# Enable import script mode (Sonarr/Radarr handle imports via script)
+enabled = true
+
+# Root folder paths where Sonarr/Radarr store media
+# These are used for symlink discovery during space management
+sonarr_root_folders = [
+    "/downloads/hdd/sonarr",
+    "/downloads/hdd/tv-shows"
+]
+
+radarr_root_folders = [
+    "/downloads/hdd/radarr", 
+    "/downloads/hdd/movies"
+]
+
+# Tautulli configuration for streaming checks
+tautulli_url = "http://tautulli:8181"
+tautulli_api_key = "your-tautulli-api-key-here"
+
+# Path mappings for different container mounts
+# Format: qbit-manager-path = plex-container-path
+[import_script.path_mappings]
+"/downloads/ssd" = "/mnt/ssd-cache/flood"
+"/downloads/hdd" = "/Downloads"
+
+# ===================================================================
+# Setup Instructions for Import Script Mode:
+# ===================================================================
+# 
+# 1. Copy scripts/sonarr-radarr-import.sh to your Sonarr/Radarr containers
+# 2. Make it executable: chmod +x /path/to/sonarr-radarr-import.sh
+# 3. In Sonarr Settings -> Import Lists:
+#    - Enable "Use Script Import"
+#    - Set "Script Import Path" to the script location
+# 4. In Radarr Settings -> Import Lists:
+#    - Enable "Use Script Import" 
+#    - Set "Script Import Path" to the script location
+# 5. Configure the root folder paths above to match your setup
+# 6. Set up Tautulli API access for streaming checks
+# 7. Configure path mappings if your containers have different mount points
+#

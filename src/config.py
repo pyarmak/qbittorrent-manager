@@ -161,6 +161,53 @@ AUTO_TAG_NEW_TORRENTS = get_env_override('AUTO_TAG_NEW_TORRENTS', 'storage_tags.
 SSD_LOCATION_TAG = get_env_override('SSD_LOCATION_TAG', 'storage_tags.ssd_tag', 'ssd')
 HDD_LOCATION_TAG = get_env_override('HDD_LOCATION_TAG', 'storage_tags.hdd_tag', 'hdd')
 
+# --- Import Script Mode Configuration ---
+ENABLE_IMPORT_SCRIPT_MODE = get_env_override('ENABLE_IMPORT_SCRIPT_MODE', 'import_script.enabled', False, bool)
+
+# --- Sonarr/Radarr Root Folder Paths (for symlink discovery during space management) ---
+SONARR_ROOT_FOLDERS = get_env_override('SONARR_ROOT_FOLDERS', 'import_script.sonarr_root_folders', [])
+RADARR_ROOT_FOLDERS = get_env_override('RADARR_ROOT_FOLDERS', 'import_script.radarr_root_folders', [])
+
+# Parse comma-separated paths from environment if provided as string
+if isinstance(SONARR_ROOT_FOLDERS, str):
+    SONARR_ROOT_FOLDERS = [path.strip() for path in SONARR_ROOT_FOLDERS.split(',') if path.strip()]
+if isinstance(RADARR_ROOT_FOLDERS, str):
+    RADARR_ROOT_FOLDERS = [path.strip() for path in RADARR_ROOT_FOLDERS.split(',') if path.strip()]
+
+# --- Tautulli Configuration (for streaming checks) ---
+TAUTULLI_URL = get_env_override('TAUTULLI_URL', 'import_script.tautulli_url', 'http://tautulli:8181')
+TAUTULLI_API_KEY = get_env_override('TAUTULLI_API_KEY', 'import_script.tautulli_api_key', '')
+
+# --- Path Mapping Configuration (for different container mounts) ---
+# Map local paths to Plex container paths for Tautulli file matching
+PLEX_PATH_MAPPINGS = {
+    # Default mappings - Local qbit-manager path -> Plex container path
+    '/downloads/ssd': '/mnt/ssd-cache/flood',  # SSD cache mapping
+    '/downloads/hdd': '/Downloads',            # HDD downloads mapping
+}
+
+# Load path mappings from TOML config if available
+try:
+    path_mappings_config = get_config('import_script.path_mappings', {})
+    if path_mappings_config:
+        PLEX_PATH_MAPPINGS.update(path_mappings_config)
+except Exception:
+    # Ignore errors during config loading
+    pass
+
+# Allow environment overrides for path mappings (JSON format)
+try:
+    import json
+    env_mappings = os.getenv('PLEX_PATH_MAPPINGS')
+    if env_mappings:
+        env_path_mappings = json.loads(env_mappings)
+        PLEX_PATH_MAPPINGS.update(env_path_mappings)
+except (json.JSONDecodeError, TypeError):
+    # Ignore JSON parsing errors
+    pass
+except Exception:
+    pass
+
 # ===================================================================
 # Validation and Helper Functions
 # ===================================================================
@@ -230,6 +277,17 @@ def validate_config():
             errors.append("HDD location tag cannot be empty when location tagging is enabled")
         if SSD_LOCATION_TAG == HDD_LOCATION_TAG:
             errors.append("SSD and HDD location tags must be different")
+    
+    # Check import script mode configuration
+    if ENABLE_IMPORT_SCRIPT_MODE:
+        if not SONARR_ROOT_FOLDERS and not RADARR_ROOT_FOLDERS:
+            warnings.append("Import script mode enabled but no root folders configured - symlink discovery may fail")
+        if not TAUTULLI_API_KEY:
+            warnings.append("Tautulli API key not set - streaming checks will fail during space management")
+        if not TAUTULLI_URL:
+            warnings.append("Tautulli URL not set - streaming checks will fail during space management")
+        if not PLEX_PATH_MAPPINGS:
+            warnings.append("PLEX_PATH_MAPPINGS not configured - may cause path matching issues with Tautulli")
     
     # Check threshold values
     if DISK_SPACE_THRESHOLD_GB < 10:
