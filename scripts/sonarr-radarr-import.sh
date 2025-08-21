@@ -65,6 +65,6 @@ fi
 echo "[MediaFile] $DEST"
 
 # Optional: Log successful operation
-echo "$(date): Successfully created symlink: $DEST -> $SOURCE" >> /config/log/import-script.log
+echo "$(date): Successfully created symlink: $DEST -> $SOURCE" >> /config/logs/import-script.log
 
 exit 0

@@ -349,7 +349,23 @@ def process_single_torrent_optimized(client: 'QBittorrentClient', torrent_info: 
         if config.ENABLE_IMPORT_SCRIPT_MODE:
             # In import script mode, Sonarr/Radarr handle their own import via the script
             # We just need to ensure the background copy is complete
-            logger.info("Copy successful and verified. Import script mode - no notification needed.")
+            logger.info("Copy successful and verified. Import script mode active.")
+            
+            # Experimental: Also notify Sonarr/Radarr if configured to do so
+            # This might speed up detection of completed downloads
+            if config.NOTIFY_ARR_IN_IMPORT_MODE:
+                logger.info("Experimental: Also notifying Arr service for faster detection...")
+                
+                service_to_notify = None
+                # Determine which service to notify based on tag (using config tags)
+                if category.lower() == config.SONARR_TAG.lower(): service_to_notify = "sonarr"
+                elif category.lower() == config.RADARR_TAG.lower(): service_to_notify = "radarr"
+                else: logger.info(f"Tag '{category}' does not match Arr tags. Skipping notification.")
+
+                # If a matching service was found, send the notification
+                if service_to_notify:
+                    # Call notify_arr_scan_downloads, passing the config dict
+                    notify_arr_scan_downloads(service_to_notify, torrent_info.hash, config.ARR_CONFIG, ssd_data_path)
         else:
             # Normal mode - notify Sonarr/Radarr to scan for the completed download
             logger.info("Copy successful and verified. Notifying Arr service...")
@@ -521,7 +537,7 @@ def manage_ssd_space(client: 'QBittorrentClient'):
             
             if success:
                 relocation_success = True
-            elif reason in ["streaming", "no_symlinks", "no_hdd_copy", "no_config"]:
+            elif reason in ["streaming", "no_symlinks", "no_links", "no_hdd_copy", "no_config"]:
                 # These are "skip this torrent" conditions, not failures
                 logger.info(f"Skipping torrent {info['torrent_info'].hash}: {reason}")
                 continue  # Skip to next torrent without trying fallback
@@ -601,23 +617,38 @@ def relocate_and_delete_ssd_import_script_mode(client: 'QBittorrentClient', torr
             logger.warning("No root folders configured for symlink discovery")
             return False, "no_config"
         
-        # Find symlinks pointing to this torrent's SSD path
-        from symlink_utils import find_symlinks_to_ssd_path
+        # Find both symlinks and hardlinks pointing to this torrent's SSD/HDD paths
+        # This provides backwards compatibility with existing hardlinks from old workflow
+        from symlink_utils import find_links_to_ssd_path
         
         try:
             # Try using the find command first (more efficient)
-            symlinks_to_replace = find_symlinks_to_ssd_path(torrent_info.path, all_root_folders)
+            symlinks_to_replace, existing_hardlinks = find_links_to_ssd_path(
+                torrent_info.path, expected_hdd_path, all_root_folders
+            )
         except Exception as e:
-            logger.warning(f"Find command failed, falling back to Python implementation: {e}")
-            # Fallback to Python implementation
-            from symlink_utils import find_symlinks_to_ssd_path_python
-            symlinks_to_replace = find_symlinks_to_ssd_path_python(torrent_info.path, all_root_folders)
+            logger.warning(f"Find command failed, using fallback: {e}")
+            # For now, fall back to old method (could implement Python version later)
+            from symlink_utils import find_symlinks_to_ssd_path
+            symlinks_to_replace = find_symlinks_to_ssd_path(torrent_info.path, all_root_folders)
+            existing_hardlinks = []
         
-        if not symlinks_to_replace:
-            logger.warning(f"No symlinks found for torrent {torrent_info.hash}, skipping relocation")
-            return False, "no_symlinks"
+        total_links = len(symlinks_to_replace) + len(existing_hardlinks)
         
-        logger.info(f"Found {len(symlinks_to_replace)} symlink(s) to replace")
+        if total_links == 0:
+            logger.warning(f"No symlinks or hardlinks found for torrent {torrent_info.hash}, skipping relocation")
+            return False, "no_links"
+        
+        logger.info(f"Found {len(symlinks_to_replace)} symlink(s) and {len(existing_hardlinks)} existing hardlink(s)")
+        
+        # If we only have existing hardlinks (no symlinks), we can proceed directly to cleanup
+        # since the content is already properly linked to HDD
+        if symlinks_to_replace and not existing_hardlinks:
+            logger.info("Found symlinks to replace with hardlinks")
+        elif existing_hardlinks and not symlinks_to_replace:
+            logger.info("Found existing hardlinks from previous workflow, proceeding to SSD cleanup")
+        else:
+            logger.info("Found both symlinks and hardlinks, proceeding with symlink replacement")
         
         # Step 3: Verify HDD copy exists and is valid
         hdd_base_dir = os.path.join(final_dest_base_hdd, torrent_info.category)
@@ -636,20 +667,25 @@ def relocate_and_delete_ssd_import_script_mode(client: 'QBittorrentClient', torr
         
         logger.info("✅ HDD copy verified successfully")
         
-        # Step 4: Replace symlinks with hardlinks
-        from symlink_utils import replace_symlinks_with_hardlinks
+        # Step 4: Replace symlinks with hardlinks (if any symlinks exist)
+        replaced_count = 0
         
-        replaced_count = replace_symlinks_with_hardlinks(
-            symlinks_to_replace, 
-            torrent_info.path, 
-            expected_hdd_path
-        )
-        
-        if replaced_count == 0:
-            logger.error("Failed to replace any symlinks with hardlinks")
-            return False, "error"
-        
-        logger.info(f"✅ Replaced {replaced_count} symlink(s) with hardlink(s)")
+        if symlinks_to_replace:
+            from symlink_utils import replace_symlinks_with_hardlinks
+            
+            replaced_count = replace_symlinks_with_hardlinks(
+                symlinks_to_replace, 
+                torrent_info.path, 
+                expected_hdd_path
+            )
+            
+            if replaced_count == 0:
+                logger.error("Failed to replace any symlinks with hardlinks")
+                return False, "error"
+            
+            logger.info(f"✅ Replaced {replaced_count} symlink(s) with hardlink(s)")
+        else:
+            logger.info("✅ No symlinks to replace - existing hardlinks are sufficient")
         
         # Step 5: Update torrent location in qBittorrent
         was_started = False

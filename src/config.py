@@ -163,6 +163,7 @@ HDD_LOCATION_TAG = get_env_override('HDD_LOCATION_TAG', 'storage_tags.hdd_tag', 
 
 # --- Import Script Mode Configuration ---
 ENABLE_IMPORT_SCRIPT_MODE = get_env_override('ENABLE_IMPORT_SCRIPT_MODE', 'import_script.enabled', False, bool)
+NOTIFY_ARR_IN_IMPORT_MODE = get_env_override('NOTIFY_ARR_IN_IMPORT_MODE', 'import_script.notify_arr_experimental', False, bool)
 
 # --- Sonarr/Radarr Root Folder Paths (for symlink discovery during space management) ---
 SONARR_ROOT_FOLDERS = get_env_override('SONARR_ROOT_FOLDERS', 'import_script.sonarr_root_folders', [])

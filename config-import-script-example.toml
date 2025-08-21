@@ -73,6 +73,11 @@ hdd_tag = "hdd"
 # Enable import script mode (Sonarr/Radarr handle imports via script)
 enabled = true
 
+# EXPERIMENTAL: Also notify Sonarr/Radarr when downloads complete
+# This might speed up detection without polling, but could cause conflicts
+# with the import script. Enable with caution and monitor logs.
+notify_arr_experimental = false
+
 # Root folder paths where Sonarr/Radarr store media
 # These are used for symlink discovery during space management
 sonarr_root_folders = [

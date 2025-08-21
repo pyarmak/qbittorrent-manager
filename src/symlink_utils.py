@@ -227,8 +227,89 @@ def cleanup_broken_symlinks(directory: str) -> int:
 # Symlink Discovery Functions (for Import Script Mode)
 # ===================================================================
 
+def find_links_to_ssd_path(ssd_path: str, hdd_path: str, search_directories: List[str]) -> tuple[List[str], List[str]]:
+    """
+    Find all symlinks AND hardlinks in search directories that point to SSD or corresponding HDD files
+    This provides backwards compatibility with existing hardlinks from the old workflow.
+    
+    Args:
+        ssd_path: SSD path to search for (can be file or directory)
+        hdd_path: Corresponding HDD path (for hardlink detection)
+        search_directories: List of directories to search for links
+    
+    Returns:
+        tuple[List[str], List[str]]: (symlinks_to_ssd, hardlinks_to_hdd)
+    """
+    symlinks_found = []
+    hardlinks_found = []
+    
+    if not search_directories:
+        logger.warning("No search directories provided for link discovery")
+        return symlinks_found, hardlinks_found
+    
+    # Normalize paths for comparison
+    ssd_path_normalized = os.path.normpath(os.path.abspath(ssd_path))
+    hdd_path_normalized = os.path.normpath(os.path.abspath(hdd_path))
+    
+    for search_dir in search_directories:
+        if not os.path.exists(search_dir):
+            logger.warning(f"Search directory does not exist: {search_dir}")
+            continue
+        
+        logger.debug(f"Searching for links in: {search_dir}")
+        
+        try:
+            # Use find command for efficiency
+            result = subprocess.run([
+                'find', search_dir, '-type', 'f', '-o', '-type', 'l'
+            ], capture_output=True, text=True, timeout=30)
+            
+            if result.returncode != 0:
+                logger.warning(f"Find command failed for {search_dir}: {result.stderr}")
+                continue
+            
+            # Check each file/link to see if it points to our SSD/HDD path
+            for file_path in result.stdout.strip().split('\n'):
+                if not file_path:  # Skip empty lines
+                    continue
+                
+                try:
+                    if os.path.islink(file_path):
+                        # Handle symlinks
+                        target_path = os.readlink(file_path)
+                        
+                        # Convert relative links to absolute paths
+                        if not os.path.isabs(target_path):
+                            target_path = os.path.join(os.path.dirname(file_path), target_path)
+                        
+                        target_path_normalized = os.path.normpath(os.path.abspath(target_path))
+                        
+                        # Check if the symlink target is within our SSD path
+                        if _is_path_within_directory(target_path_normalized, ssd_path_normalized):
+                            symlinks_found.append(file_path)
+                            logger.debug(f"Found symlink: {file_path} -> {target_path}")
+                    
+                    elif os.path.isfile(file_path):
+                        # Handle regular files - check if they're hardlinks to HDD files
+                        if _is_hardlink_to_hdd_path(file_path, hdd_path_normalized):
+                            hardlinks_found.append(file_path)
+                            logger.debug(f"Found hardlink to HDD: {file_path}")
+                
+                except (OSError, ValueError) as e:
+                    logger.debug(f"Error checking file {file_path}: {e}")
+                    continue
+        
+        except subprocess.TimeoutExpired:
+            logger.error(f"Timeout while searching for links in {search_dir}")
+        except Exception as e:
+            logger.error(f"Error searching for links in {search_dir}: {e}")
+    
+    logger.info(f"Found {len(symlinks_found)} symlink(s) and {len(hardlinks_found)} hardlink(s) for path: {ssd_path}")
+    return symlinks_found, hardlinks_found
+
 def find_symlinks_to_ssd_path(ssd_path: str, search_directories: List[str]) -> List[str]:
     """
+    DEPRECATED: Use find_links_to_ssd_path instead for backwards compatibility
     Find all symlinks in search directories that point to files within the SSD path
     
     Args:
@@ -403,6 +484,56 @@ def _is_path_within_directory(file_path: str, directory_path: str) -> bool:
         return not rel_path.startswith('..')
     except ValueError:
         # Different drives on Windows
+        return False
+
+def _is_hardlink_to_hdd_path(file_path: str, hdd_path_normalized: str) -> bool:
+    """
+    Check if a file is a hardlink to a file within the HDD path
+    
+    Args:
+        file_path: File to check
+        hdd_path_normalized: Normalized HDD path to check against
+    
+    Returns:
+        bool: True if the file is a hardlink to something in the HDD path
+    """
+    try:
+        if not os.path.exists(file_path):
+            return False
+        
+        # Get file stats
+        file_stat = os.stat(file_path)
+        
+        # If hardlink count is 1, it's not a hardlink
+        if file_stat.st_nlink <= 1:
+            return False
+        
+        # For hardlink detection, we need to check if there's a corresponding file
+        # in the HDD directory structure with the same inode
+        
+        # Calculate relative path of the file from its search directory
+        # and check if corresponding HDD file exists with same inode
+        
+        # Walk through HDD directory to find files with same inode
+        for root, dirs, files in os.walk(hdd_path_normalized):
+            for filename in files:
+                hdd_file_path = os.path.join(root, filename)
+                try:
+                    hdd_stat = os.stat(hdd_file_path)
+                    
+                    # Check if same device and inode (indicates hardlink)
+                    if (file_stat.st_dev == hdd_stat.st_dev and 
+                        file_stat.st_ino == hdd_stat.st_ino and
+                        file_path != hdd_file_path):  # Different paths but same inode
+                        logger.debug(f"Found hardlink: {file_path} <-> {hdd_file_path}")
+                        return True
+                except (OSError, ValueError):
+                    continue
+        
+        return False
+        
+    except Exception as e:
+        logger.debug(f"Error checking hardlink for {file_path}: {e}")
         return False
 
 def replace_symlinks_with_hardlinks(symlink_paths: List[str], ssd_path: str, hdd_path: str) -> int:
