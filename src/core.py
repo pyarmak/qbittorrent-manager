@@ -272,13 +272,27 @@ def process_single_torrent_optimized(client: 'QBittorrentClient', torrent_info: 
     ssd_data_path = torrent_info.path
     category = torrent_info.category
 
-    # 2. Construct Paths using config paths
+    # 1. Construct Paths using config paths
     hdd_base_dir = os.path.join(config.FINAL_DEST_BASE_HDD, category)
     hdd_data_path = os.path.join(hdd_base_dir, torrent_info.name.strip())
     logger.info(f"Source SSD Path: {ssd_data_path}")
     logger.info(f"Target HDD Path: {hdd_data_path}")
     logger.info(f"Torrent Category: {category}")
     logger.info(f"Multi-file: {is_multi} ({torrent_info.size / (1024**3):.2f} GB)")
+
+    # 2. Notify Arr in Import Script Mode
+    if config.ENABLE_IMPORT_SCRIPT_MODE and config.NOTIFY_ARR_IN_IMPORT_MODE:
+        logger.info("Notifying Arr service for faster detection...")
+        service_to_notify = None
+        # Determine which service to notify based on tag (using config tags)
+        if category.lower() == config.SONARR_TAG.lower(): service_to_notify = "sonarr"
+        elif category.lower() == config.RADARR_TAG.lower(): service_to_notify = "radarr"
+        else: logger.info(f"Tag '{category}' does not match Arr tags. Skipping notification.")
+
+        # If a matching service was found, send the notification
+        if service_to_notify:
+            # Call notify_arr_scan_downloads, passing the config dict
+            notify_arr_scan_downloads(service_to_notify, torrent_info.hash, config.ARR_CONFIG, ssd_data_path)
 
     # 3. Pre-Copy Check: Handle existing destination from previous script run
     if os.path.exists(hdd_data_path):
@@ -350,22 +364,6 @@ def process_single_torrent_optimized(client: 'QBittorrentClient', torrent_info: 
             # In import script mode, Sonarr/Radarr handle their own import via the script
             # We just need to ensure the background copy is complete
             logger.info("Copy successful and verified. Import script mode active.")
-            
-            # Experimental: Also notify Sonarr/Radarr if configured to do so
-            # This might speed up detection of completed downloads
-            if config.NOTIFY_ARR_IN_IMPORT_MODE:
-                logger.info("Experimental: Also notifying Arr service for faster detection...")
-                
-                service_to_notify = None
-                # Determine which service to notify based on tag (using config tags)
-                if category.lower() == config.SONARR_TAG.lower(): service_to_notify = "sonarr"
-                elif category.lower() == config.RADARR_TAG.lower(): service_to_notify = "radarr"
-                else: logger.info(f"Tag '{category}' does not match Arr tags. Skipping notification.")
-
-                # If a matching service was found, send the notification
-                if service_to_notify:
-                    # Call notify_arr_scan_downloads, passing the config dict
-                    notify_arr_scan_downloads(service_to_notify, torrent_info.hash, config.ARR_CONFIG, ssd_data_path)
         else:
             # Normal mode - notify Sonarr/Radarr to scan for the completed download
             logger.info("Copy successful and verified. Notifying Arr service...")
