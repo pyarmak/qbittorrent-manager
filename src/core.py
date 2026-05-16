@@ -615,6 +615,10 @@ def relocate_and_delete_ssd_import_script_mode(client: 'QBittorrentClient', torr
             logger.warning("No root folders configured for symlink discovery")
             return False, "no_config"
         
+        # Step 3 (moved up): Compute expected HDD path before it's needed in Step 2
+        hdd_base_dir = os.path.join(final_dest_base_hdd, torrent_info.category)
+        expected_hdd_path = os.path.join(hdd_base_dir, torrent_info.name.strip())
+        
         # Find both symlinks and hardlinks pointing to this torrent's SSD/HDD paths
         # This provides backwards compatibility with existing hardlinks from old workflow
         from symlink_utils import find_links_to_ssd_path
@@ -649,8 +653,7 @@ def relocate_and_delete_ssd_import_script_mode(client: 'QBittorrentClient', torr
             logger.info("Found both symlinks and hardlinks, proceeding with symlink replacement")
         
         # Step 3: Verify HDD copy exists and is valid
-        hdd_base_dir = os.path.join(final_dest_base_hdd, torrent_info.category)
-        expected_hdd_path = os.path.join(hdd_base_dir, torrent_info.name.strip())
+        # (expected_hdd_path already computed above)
         
         if not os.path.exists(expected_hdd_path):
             logger.warning(f"HDD copy doesn't exist at {expected_hdd_path}")
