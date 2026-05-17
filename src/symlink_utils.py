@@ -540,10 +540,15 @@ def replace_symlinks_with_hardlinks(symlink_paths: List[str], ssd_path: str, hdd
     """
     Replace symlinks with hardlinks to HDD files
     
+    This function handles path translation between different directory structures.
+    For example, if the symlink points to /downloading/radarr/<torrent>/file.mkv (SSD)
+    and the HDD copy is at /downloads/flood/radarr/<torrent>/file.mkv, it will
+    correctly map the file and create a hardlink.
+    
     Args:
-        symlink_paths: List of symlink paths to replace
-        ssd_path: Original SSD path (for path translation)
-        hdd_path: HDD path where files were copied
+        symlink_paths: List of symlink paths to replace (from arr's library)
+        ssd_path: Original SSD path where torrent was downloaded (e.g., /downloading/radarr/<torrent>)
+        hdd_path: HDD path where files were copied (e.g., /downloads/flood/radarr/<torrent>)
     
     Returns:
         int: Number of symlinks successfully replaced
@@ -559,8 +564,8 @@ def replace_symlinks_with_hardlinks(symlink_paths: List[str], ssd_path: str, hdd
     hdd_path_normalized = os.path.normpath(os.path.abspath(hdd_path))
     
     logger.info(f"Replacing {len(symlink_paths)} symlink(s) with hardlinks")
-    logger.debug(f"SSD path: {ssd_path_normalized}")
-    logger.debug(f"HDD path: {hdd_path_normalized}")
+    logger.debug(f"SSD torrent path: {ssd_path_normalized}")
+    logger.debug(f"HDD torrent path: {hdd_path_normalized}")
     
     for symlink_path in symlink_paths:
         try:
@@ -568,7 +573,7 @@ def replace_symlinks_with_hardlinks(symlink_paths: List[str], ssd_path: str, hdd
                 logger.warning(f"Path is not a symlink, skipping: {symlink_path}")
                 continue
             
-            # Get the current target of the symlink
+            # Get the current target of the symlink (should point to SSD)
             current_target = os.readlink(symlink_path)
             
             # Convert relative target to absolute
@@ -577,38 +582,54 @@ def replace_symlinks_with_hardlinks(symlink_paths: List[str], ssd_path: str, hdd
             
             current_target_normalized = os.path.normpath(os.path.abspath(current_target))
             
-            # Calculate the corresponding HDD path
-            # Replace the SSD base path with the HDD base path
+            logger.debug(f"Processing symlink: {symlink_path}")
+            logger.debug(f"  Current target (SSD): {current_target_normalized}")
+            
+            # Calculate the relative path within the torrent
+            # This is the path from the torrent root to the specific file
             try:
                 rel_path = os.path.relpath(current_target_normalized, ssd_path_normalized)
                 if rel_path.startswith('..'):
-                    logger.warning(f"Symlink target is not within SSD path, skipping: {symlink_path}")
+                    logger.warning(f"Symlink target is not within SSD torrent path, skipping: {symlink_path}")
+                    logger.debug(f"  Target: {current_target_normalized}")
+                    logger.debug(f"  SSD base: {ssd_path_normalized}")
                     continue
                 
-                # Construct the HDD target path
+                # Construct the corresponding HDD path
+                # This maps the file from SSD torrent location to HDD torrent location
                 if rel_path == '.':
+                    # Symlink points to the torrent directory itself
                     hdd_target_path = hdd_path_normalized
                 else:
+                    # Symlink points to a file within the torrent
                     hdd_target_path = os.path.join(hdd_path_normalized, rel_path)
                 
-            except ValueError:
+                logger.debug(f"  Relative path within torrent: {rel_path}")
+                logger.debug(f"  Corresponding HDD path: {hdd_target_path}")
+                
+            except ValueError as e:
                 logger.warning(f"Cannot calculate relative path for symlink: {symlink_path}")
+                logger.debug(f"  Error: {e}")
                 continue
             
             # Verify the HDD target exists
             if not os.path.exists(hdd_target_path):
                 logger.error(f"HDD target does not exist, skipping: {hdd_target_path}")
+                logger.debug(f"  Symlink: {symlink_path}")
+                logger.debug(f"  Expected HDD file: {hdd_target_path}")
                 continue
             
             # Replace symlink with hardlink
             if _replace_single_symlink_with_hardlink(symlink_path, hdd_target_path):
                 replaced_count += 1
                 logger.info(f"✅ Replaced symlink: {symlink_path}")
+                logger.debug(f"  Now hardlinked to: {hdd_target_path}")
             else:
                 logger.error(f"❌ Failed to replace symlink: {symlink_path}")
         
         except Exception as e:
             logger.error(f"Error processing symlink {symlink_path}: {e}")
+            logger.debug(f"  Exception details: {type(e).__name__}: {str(e)}")
             continue
     
     logger.info(f"Successfully replaced {replaced_count}/{len(symlink_paths)} symlinks with hardlinks")
