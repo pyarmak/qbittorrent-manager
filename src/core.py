@@ -30,6 +30,37 @@ if typing.TYPE_CHECKING:
     from qbittorrentapi import Client as QBittorrentClient
 
 # ===================================================================
+# Helper Functions
+# ===================================================================
+def should_copy_as_directory(content_path: str, num_files: int) -> bool:
+    """
+    Determine if content should be copied as a directory or file.
+    
+    OPTIMIZATION: If multiple files, it's definitely a directory (skip filesystem check).
+    If single file, check filesystem to handle single-file torrents with folder structure.
+    
+    Args:
+        content_path: Path to the torrent content
+        num_files: Number of files in the torrent
+    
+    Returns:
+        bool: True if should copy as directory, False if should copy as file
+    
+    Examples:
+        - Multiple files: Always True (must be a directory)
+        - Single file in folder (Movie.2024/Movie.mkv): True (directory)
+        - Single file, no folder (Movie.mkv): False (file)
+    """
+    if num_files > 1:
+        # Multiple files = must be a directory (skip filesystem check for efficiency)
+        return True
+    else:
+        # Single file: could be "file.mkv" OR "Folder/file.mkv"
+        # Check actual filesystem structure
+        return os.path.isdir(content_path)
+
+
+# ===================================================================
 # Core Action Functions
 # ===================================================================
 def notify_arr_scan_downloads(service_type, download_id: 'BTIH', arr_config, hdd_path: str = None):
@@ -162,14 +193,15 @@ def relocate_and_delete_ssd(client: 'QBittorrentClient', torrent_info: 'TorrentI
             logger.info(f"Need to copy data from SSD to HDD first...")
             
             if config.DRY_RUN:
-                logger.info(f"[DRY RUN] Would copy {'directory' if torrent_info.is_multi_file else 'file'} from {torrent_info.path} to {expected_hdd_path}")
+                logger.info(f"[DRY RUN] Would copy {'directory' if should_copy_as_directory(torrent_info.path, torrent_info.num_files) else 'file'} from {torrent_info.path} to {expected_hdd_path}")
             else:
                 try:
                     # Ensure base directory exists
                     os.makedirs(hdd_base_dir, exist_ok=True)
                     
                     copy_start_time = time.time()
-                    if torrent_info.is_multi_file:
+                    is_directory = should_copy_as_directory(torrent_info.path, torrent_info.num_files)
+                    if is_directory:
                         shutil.copytree(torrent_info.path, expected_hdd_path, copy_function=shutil.copy2, dirs_exist_ok=True)
                     else:
                         shutil.copy2(torrent_info.path, expected_hdd_path)
@@ -177,7 +209,7 @@ def relocate_and_delete_ssd(client: 'QBittorrentClient', torrent_info: 'TorrentI
                     
                     # Verify the copy was successful
                     # Note: verify_copy already imported at top of file
-                    if not verify_copy(torrent_info.path, expected_hdd_path, torrent_info.is_multi_file):
+                    if not verify_copy(torrent_info.path, expected_hdd_path, is_directory):
                         logger.error(f"Copy verification failed!")
                         if was_started: 
                             logger.info("Attempting to resume torrent after copy failure...")
@@ -268,9 +300,11 @@ def process_single_torrent_optimized(client: 'QBittorrentClient', torrent_info: 
     copy_verified = False
 
     # Extract needed variables (no API calls needed!)
-    is_multi = torrent_info.is_multi_file
     ssd_data_path = torrent_info.path
     category = torrent_info.category
+    
+    # Determine if we should copy as directory or file
+    is_directory = should_copy_as_directory(ssd_data_path, torrent_info.num_files)
 
     # 1. Construct Paths using config paths
     hdd_base_dir = os.path.join(config.FINAL_DEST_BASE_HDD, category)
@@ -278,7 +312,7 @@ def process_single_torrent_optimized(client: 'QBittorrentClient', torrent_info: 
     logger.info(f"Source SSD Path: {ssd_data_path}")
     logger.info(f"Target HDD Path: {hdd_data_path}")
     logger.info(f"Torrent Category: {category}")
-    logger.info(f"Multi-file: {is_multi} ({torrent_info.size / (1024**3):.2f} GB)")
+    logger.info(f"Content type: {'Directory' if is_directory else 'File'} ({torrent_info.num_files} file(s), {torrent_info.size / (1024**3):.2f} GB)")
 
     # 2. Notify Arr in Import Script Mode
     if config.ENABLE_IMPORT_SCRIPT_MODE and config.NOTIFY_ARR_IN_IMPORT_MODE:
@@ -298,7 +332,7 @@ def process_single_torrent_optimized(client: 'QBittorrentClient', torrent_info: 
     if os.path.exists(hdd_data_path):
         logger.warning(f"Destination path '{hdd_data_path}' already exists.")
         # Call verify_copy from util
-        if verify_copy(ssd_data_path, hdd_data_path, is_multi):
+        if verify_copy(ssd_data_path, hdd_data_path, is_directory):
             logger.info("Existing destination verified successfully. Skipping copy.")
             copy_verified = True # Treat existing verified copy as success
         else:
@@ -325,12 +359,14 @@ def process_single_torrent_optimized(client: 'QBittorrentClient', torrent_info: 
                 copy_start_time = time.time()
                 
                 if config.DRY_RUN:
-                    logger.info(f"[DRY RUN] Would copy {'directory' if is_multi else 'file'} from {ssd_data_path} to {hdd_data_path}")
+                    logger.info(f"[DRY RUN] Would copy {'directory' if is_directory else 'file'} from {ssd_data_path} to {hdd_data_path}")
                     copy_succeeded_this_attempt = True
                 else:
-                    if is_multi:
+                    if is_directory:
+                        # Copy entire directory structure
                         shutil.copytree(ssd_data_path, hdd_data_path, copy_function=shutil.copy2, dirs_exist_ok=True)
                     else:
+                        # Copy single file (ensure parent directory exists)
                         os.makedirs(os.path.dirname(hdd_data_path), exist_ok=True)
                         shutil.copy2(ssd_data_path, hdd_data_path)
                     logger.info(f"Copy finished in {time.time() - copy_start_time:.2f} seconds (Attempt {attempt}).")
@@ -345,7 +381,7 @@ def process_single_torrent_optimized(client: 'QBittorrentClient', torrent_info: 
                     logger.info(f"[DRY RUN] Would verify copy integrity")
                     copy_verified = True; break
                 # Call verify_copy from util
-                elif verify_copy(ssd_data_path, hdd_data_path, is_multi):
+                elif verify_copy(ssd_data_path, hdd_data_path, is_directory):
                     copy_verified = True; break # Success! Exit loop.
                 else:
                     logger.warning(f"Verification failed on attempt {attempt}.") # Loop continues
@@ -690,7 +726,8 @@ def relocate_and_delete_ssd_import_script_mode(client: 'QBittorrentClient', torr
                     os.makedirs(hdd_base_dir, exist_ok=True)
                     copy_start_time = time.time()
                     
-                    if torrent_info.is_multi_file:
+                    is_directory = should_copy_as_directory(torrent_info.path, torrent_info.num_files)
+                    if is_directory:
                         shutil.copytree(torrent_info.path, expected_hdd_path, 
                                       copy_function=shutil.copy2, dirs_exist_ok=True)
                     else:
@@ -700,7 +737,7 @@ def relocate_and_delete_ssd_import_script_mode(client: 'QBittorrentClient', torr
                     
                     # Verify the copy
                     from util import verify_copy
-                    if verify_copy(torrent_info.path, expected_hdd_path, torrent_info.is_multi_file):
+                    if verify_copy(torrent_info.path, expected_hdd_path, is_directory):
                         logger.info("✅ HDD copy created and verified successfully")
                         copy_success = True
                         break
@@ -717,7 +754,8 @@ def relocate_and_delete_ssd_import_script_mode(client: 'QBittorrentClient', torr
         else:
             # HDD copy exists — verify its integrity
             from util import verify_copy
-            if not verify_copy(torrent_info.path, expected_hdd_path, torrent_info.is_multi_file):
+            is_directory = should_copy_as_directory(torrent_info.path, torrent_info.num_files)
+            if not verify_copy(torrent_info.path, expected_hdd_path, is_directory):
                 logger.error("HDD copy verification failed. Skipping import script mode relocation.")
                 return False, "no_hdd_copy"
             
