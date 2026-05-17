@@ -153,16 +153,38 @@ def verify_arr_import(
         # Check if the imported path is a symlink or hardlink
         if os.path.islink(imported_path):
             has_symlinks = True
-            logger.debug(f"{service} imported file is a symlink: {imported_path}")
+            symlink_target = os.readlink(imported_path)
+            logger.debug(f"{service} imported file is a symlink: {imported_path} -> {symlink_target}")
         elif os.path.exists(imported_path):
-            # Check if it's a hardlink to the HDD copy
-            if _is_hardlink_to_hdd(imported_path, hdd_path_norm):
-                has_hardlinks = True
-                logger.debug(f"{service} imported file is a hardlink to HDD: {imported_path}")
-            else:
-                # Regular file or hardlink to somewhere else (treat as symlink case)
+            # Get file stats for detailed analysis
+            try:
+                file_stat = os.stat(imported_path)
+                link_count = file_stat.st_nlink
+                
+                logger.debug(f"{service} imported file link count: {link_count} for {imported_path}")
+                
+                if link_count > 1:
+                    # It's a hardlink - check if it's to HDD
+                    # Note: Hardlinks to SSD are impossible since SSD and HDD are different filesystems
+                    # So if link_count > 1, it must be hardlinked to something on the same filesystem as arr's library
+                    if _is_hardlink_to_hdd(imported_path, hdd_path_norm):
+                        has_hardlinks = True
+                        logger.debug(f"{service} imported file is a hardlink to HDD: {imported_path}")
+                    else:
+                        # Hardlink to something else on the same filesystem (not our HDD copy)
+                        # This could be a hardlink created by arr to another location in /downloads
+                        # We need to replace it with a hardlink to our HDD seeding location
+                        has_symlinks = True
+                        logger.debug(f"{service} imported file is a hardlink but NOT to our HDD seeding location: {imported_path}")
+                else:
+                    # Regular file (link count = 1) - this is a copy, not a link
+                    # Arr copied the file instead of linking it
+                    has_symlinks = True
+                    logger.debug(f"{service} imported file is a regular file copy (not linked): {imported_path}")
+            except (OSError, ValueError) as e:
+                logger.warning(f"{service} error checking file stats for {imported_path}: {e}")
+                # Treat as needs replacement to be safe
                 has_symlinks = True
-                logger.debug(f"{service} imported file is not linked to HDD: {imported_path}")
         else:
             logger.warning(f"{service} imported path does not exist: {imported_path}")
 
