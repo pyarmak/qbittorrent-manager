@@ -535,7 +535,8 @@ def manage_ssd_space(client: 'QBittorrentClient'):
             
             if success:
                 relocation_success = True
-            elif reason in ["streaming", "no_symlinks", "no_links", "no_hdd_copy", "no_config"]:
+            elif reason in ["streaming", "no_symlinks", "no_hdd_copy", "no_config",
+                            "arr_not_imported", "arr_api_error"]:
                 # These are "skip this torrent" conditions, not failures
                 logger.info(f"Skipping torrent {info['torrent_info'].hash}: {reason}")
                 continue  # Skip to next torrent without trying fallback
@@ -577,7 +578,9 @@ def relocate_and_delete_ssd_import_script_mode(client: 'QBittorrentClient', torr
         - (True, "success"): Successfully relocated and deleted
         - (False, "streaming"): Files currently streaming, skip this torrent
         - (False, "no_symlinks"): No symlinks found, skip this torrent  
-        - (False, "no_hdd_copy"): HDD copy missing/invalid, skip this torrent
+        - (False, "no_hdd_copy"): HDD copy missing or failed verification, skip this torrent
+        - (False, "arr_not_imported"): Arr has not imported from HDD yet, skip this torrent
+        - (False, "arr_api_error"): Could not reach arr API, skip this torrent (fail-safe)
         - (False, "error"): Actual failure, could try fallback
     """
     if not config.ENABLE_IMPORT_SCRIPT_MODE:
@@ -638,10 +641,13 @@ def relocate_and_delete_ssd_import_script_mode(client: 'QBittorrentClient', torr
         total_links = len(symlinks_to_replace) + len(existing_hardlinks)
         
         if total_links == 0:
-            logger.warning(f"No symlinks or hardlinks found for torrent {torrent_info.hash}, skipping relocation")
-            return False, "no_links"
-        
-        logger.info(f"Found {len(symlinks_to_replace)} symlink(s) and {len(existing_hardlinks)} existing hardlink(s)")
+            # No symlinks or hardlinks found - this is common for torrents that were imported
+            # before import script mode was set up, or where Sonarr/Radarr imported directly.
+            # Don't bail out here - the HDD copy check below is the real safety gate.
+            # If the HDD copy exists and is valid, we can still relocate safely.
+            logger.info(f"No symlinks or hardlinks found for torrent {torrent_info.hash} - will proceed if HDD copy is valid")
+        else:
+            logger.info(f"Found {len(symlinks_to_replace)} symlink(s) and {len(existing_hardlinks)} existing hardlink(s)")
         
         # If we only have existing hardlinks (no symlinks), we can proceed directly to cleanup
         # since the content is already properly linked to HDD
@@ -649,33 +655,190 @@ def relocate_and_delete_ssd_import_script_mode(client: 'QBittorrentClient', torr
             logger.info("Found symlinks to replace with hardlinks")
         elif existing_hardlinks and not symlinks_to_replace:
             logger.info("Found existing hardlinks from previous workflow, proceeding to SSD cleanup")
-        else:
+        elif total_links > 0:
             logger.info("Found both symlinks and hardlinks, proceeding with symlink replacement")
         
-        # Step 3: Verify HDD copy exists and is valid
+        # Step 3: Verify HDD copy exists and is valid (or create it if missing)
         # (expected_hdd_path already computed above)
         
         if not os.path.exists(expected_hdd_path):
             logger.warning(f"HDD copy doesn't exist at {expected_hdd_path}")
-            logger.info("HDD copy missing, skipping import script mode relocation")
-            return False, "no_hdd_copy"
-        
-        # Verify HDD copy integrity
-        from util import verify_copy
-        if not verify_copy(torrent_info.path, expected_hdd_path, torrent_info.is_multi_file):
-            logger.error("HDD copy verification failed. Skipping import script mode relocation.")
-            return False, "no_hdd_copy"
-        
-        logger.info("✅ HDD copy verified successfully")
-        
+            logger.info("HDD copy missing — this indicates the initial copy failed or was incomplete")
+            logger.info("Attempting to create HDD copy now...")
+            
+            # Attempt to copy from SSD to HDD with retry logic
+            copy_success = False
+            max_attempts = max(1, config.COPY_RETRY_ATTEMPTS)
+            
+            for attempt in range(1, max_attempts + 1):
+                logger.info(f"Copy attempt {attempt}/{max_attempts}...")
+                
+                # Clean up any partial copy from previous attempt
+                if attempt > 1 and os.path.exists(expected_hdd_path):
+                    logger.info("Cleaning up partial copy from previous attempt...")
+                    try:
+                        if os.path.isdir(expected_hdd_path):
+                            shutil.rmtree(expected_hdd_path)
+                        else:
+                            os.remove(expected_hdd_path)
+                    except Exception as cleanup_e:
+                        logger.error(f"Failed to clean up partial copy: {cleanup_e}")
+                        continue
+                
+                try:
+                    # Ensure base directory exists
+                    os.makedirs(hdd_base_dir, exist_ok=True)
+                    copy_start_time = time.time()
+                    
+                    if torrent_info.is_multi_file:
+                        shutil.copytree(torrent_info.path, expected_hdd_path, 
+                                      copy_function=shutil.copy2, dirs_exist_ok=True)
+                    else:
+                        shutil.copy2(torrent_info.path, expected_hdd_path)
+                    
+                    logger.info(f"Copy completed in {time.time() - copy_start_time:.2f} seconds")
+                    
+                    # Verify the copy
+                    from util import verify_copy
+                    if verify_copy(torrent_info.path, expected_hdd_path, torrent_info.is_multi_file):
+                        logger.info("✅ HDD copy created and verified successfully")
+                        copy_success = True
+                        break
+                    else:
+                        logger.warning(f"Copy verification failed on attempt {attempt}")
+                        
+                except (shutil.Error, OSError) as e:
+                    logger.error(f"Copy failed on attempt {attempt}: {e}")
+            
+            if not copy_success:
+                logger.error(f"Failed to create HDD copy after {max_attempts} attempts")
+                logger.info("Skipping import script mode relocation — cannot proceed without HDD copy")
+                return False, "no_hdd_copy"
+        else:
+            # HDD copy exists — verify its integrity
+            from util import verify_copy
+            if not verify_copy(torrent_info.path, expected_hdd_path, torrent_info.is_multi_file):
+                logger.error("HDD copy verification failed. Skipping import script mode relocation.")
+                return False, "no_hdd_copy"
+            
+            logger.info("✅ HDD copy verified successfully")
+
+        # Step 3b: Verify Sonarr/Radarr has imported and check link status.
+        # This is the critical safety gate — we must not delete SSD data until
+        # the arr application has confirmed it imported the files.
+        # 
+        # The arr API tells us:
+        # - Whether arr has imported this torrent (has history records)
+        # - Whether the imported files are symlinks (need replacement) or hardlinks to HDD (already done)
+        # - The actual imported paths in arr's library
+        #
+        # We use the returned imported_paths list for symlink replacement instead of
+        # searching with find_links_to_ssd_path, which is more accurate and efficient.
+        from arr import verify_arr_import
+        arr_ok, arr_reason, imported_paths = verify_arr_import(
+            torrent_hash=str(torrent_info.hash),
+            torrent_category=torrent_info.category,
+            expected_hdd_path=expected_hdd_path,
+            sonarr_url=config.SONARR_URL,
+            sonarr_api_key=config.SONARR_API_KEY,
+            radarr_url=config.RADARR_URL,
+            radarr_api_key=config.RADARR_API_KEY,
+            sonarr_tag=config.SONARR_TAG,
+            radarr_tag=config.RADARR_TAG,
+        )
+
+        if not arr_ok:
+            if arr_reason == "not_configured":
+                # API keys/URLs not set — log a warning but proceed with caution.
+                # We can only safely proceed if:
+                # 1. We found existing hardlinks (already properly linked to HDD), OR
+                # 2. We found no links at all (arr hasn't imported yet)
+                # If we found symlinks, we CANNOT proceed without arr verification.
+                logger.warning(
+                    "Arr import verification skipped (not configured)"
+                )
+                
+                if symlinks_to_replace:
+                    logger.error(
+                        f"Found {len(symlinks_to_replace)} symlink(s) but cannot verify arr import status "
+                        "without arr API configuration. Skipping relocation to avoid breaking imports."
+                    )
+                    return False, "no_config"
+                elif existing_hardlinks:
+                    logger.info(
+                        f"Found {len(existing_hardlinks)} existing hardlink(s) to HDD — "
+                        "safe to proceed without arr verification"
+                    )
+                    imported_paths = []  # No replacement needed
+                else:
+                    logger.info(
+                        "No symlinks or hardlinks found — arr likely hasn't imported yet, "
+                        "safe to proceed based on HDD copy verification alone"
+                    )
+                    imported_paths = []  # No replacement needed
+                    
+            elif arr_reason == "unknown_category":
+                # Category doesn't map to sonarr or radarr (e.g. 'apps', 'games').
+                # These torrents are not managed by arr, so we can safely proceed.
+                logger.info(
+                    f"Torrent category '{torrent_info.category}' is not an arr category — "
+                    "skipping arr import verification"
+                )
+                # Use the symlinks found by find_links_to_ssd_path as fallback
+                imported_paths = symlinks_to_replace
+            elif arr_reason == "not_imported":
+                # Arr has not yet imported — trigger a rescan and skip for now.
+                logger.warning(
+                    f"Arr has not imported {torrent_info.hash} yet — triggering arr rescan"
+                )
+                
+                # Trigger arr to scan for this download
+                service_to_notify = None
+                if torrent_info.category.lower() == config.SONARR_TAG.lower():
+                    service_to_notify = "sonarr"
+                elif torrent_info.category.lower() == config.RADARR_TAG.lower():
+                    service_to_notify = "radarr"
+                
+                if service_to_notify:
+                    logger.info(f"Notifying {service_to_notify} to scan for download...")
+                    notify_arr_scan_downloads(
+                        service_to_notify, 
+                        torrent_info.hash, 
+                        config.ARR_CONFIG, 
+                        expected_hdd_path
+                    )
+                
+                logger.info("Skipping relocation for now — will retry on next space management cycle")
+                return False, "arr_not_imported"
+            else:
+                # API error — fail safe: skip this torrent rather than risk data loss.
+                logger.warning(
+                    f"Could not reach arr API ({arr_reason}) for {torrent_info.hash} — "
+                    "skipping relocation (fail-safe)"
+                )
+                return False, "arr_api_error"
+        elif arr_reason == "imported_with_hardlinks":
+            # Arr has already imported with hardlinks to HDD — safe to delete SSD
+            logger.info("✅ Arr has imported with hardlinks to HDD — safe to delete SSD")
+            # No symlink replacement needed, skip to Step 5
+            imported_paths = []
+        elif arr_reason == "imported_with_symlinks":
+            # Arr has imported with symlinks to SSD — need to replace with hardlinks
+            logger.info(f"✅ Arr has imported with symlinks — need to replace {len(imported_paths)} file(s)")
+            # imported_paths contains the actual paths to replace
+        else:
+            logger.warning(f"Unexpected arr_reason: {arr_reason}")
+            imported_paths = symlinks_to_replace
+
         # Step 4: Replace symlinks with hardlinks (if any symlinks exist)
+        # Use imported_paths from arr API (more accurate than find_links_to_ssd_path)
         replaced_count = 0
         
-        if symlinks_to_replace:
+        if imported_paths:
             from symlink_utils import replace_symlinks_with_hardlinks
             
             replaced_count = replace_symlinks_with_hardlinks(
-                symlinks_to_replace, 
+                imported_paths, 
                 torrent_info.path, 
                 expected_hdd_path
             )
@@ -686,7 +849,7 @@ def relocate_and_delete_ssd_import_script_mode(client: 'QBittorrentClient', torr
             
             logger.info(f"✅ Replaced {replaced_count} symlink(s) with hardlink(s)")
         else:
-            logger.info("✅ No symlinks to replace - existing hardlinks are sufficient")
+            logger.info("✅ No symlinks to replace - arr has already imported with hardlinks or no arr import")
         
         # Step 5: Update torrent location in qBittorrent
         was_started = False
