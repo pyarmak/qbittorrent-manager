@@ -628,8 +628,11 @@ def manage_ssd_space(client: 'QBittorrentClient'):
             if success:
                 relocation_success = True
             elif reason in ["streaming", "no_symlinks", "no_hdd_copy", "no_config",
-                            "arr_not_imported", "arr_api_error"]:
-                # These are "skip this torrent" conditions, not failures
+                            "arr_not_imported", "arr_api_error", "link_replacement_failed"]:
+                # These are "skip this torrent" conditions, not failures.
+                # link_replacement_failed in particular must never fall through to
+                # the plain relocation below: the arr library still points at the
+                # SSD copy, so deleting it would break every one of those links.
                 logger.info(f"Skipping torrent {info['torrent_info'].hash}: {reason}")
                 continue  # Skip to next torrent without trying fallback
             else:
@@ -673,6 +676,9 @@ def relocate_and_delete_ssd_import_script_mode(client: 'QBittorrentClient', torr
         - (False, "no_hdd_copy"): HDD copy missing or failed verification, skip this torrent
         - (False, "arr_not_imported"): Arr has not imported from HDD yet, skip this torrent
         - (False, "arr_api_error"): Could not reach arr API, skip this torrent (fail-safe)
+        - (False, "link_replacement_failed"): Could not repoint every library link at
+          the HDD copy (often a cross-filesystem hardlink); skip so the SSD copy the
+          library still references is preserved
         - (False, "error"): Actual failure, could try fallback
     """
     if not config.ENABLE_IMPORT_SCRIPT_MODE:
@@ -931,9 +937,20 @@ def relocate_and_delete_ssd_import_script_mode(client: 'QBittorrentClient', torr
                 expected_hdd_path
             )
             
-            if replaced_count == 0:
-                logger.error("Failed to replace any symlinks with hardlinks")
-                return False, "error"
+            # Every library entry must now point at the HDD copy. Deleting the SSD
+            # data while any entry still points at it would leave the arr library
+            # with dangling links, so a partial result is treated as a failure and
+            # the torrent is skipped rather than falling back to a plain relocation.
+            if replaced_count < len(imported_paths):
+                logger.error(
+                    f"Only replaced {replaced_count}/{len(imported_paths)} link(s) with hardlinks. "
+                    "Leaving the SSD copy in place so the library keeps working."
+                )
+                logger.error(
+                    "A common cause is the arr library and the HDD download directory "
+                    "living on different filesystems (hardlinks cannot cross them)."
+                )
+                return False, "link_replacement_failed"
             
             logger.info(f"✅ Replaced {replaced_count} symlink(s) with hardlink(s)")
         else:
