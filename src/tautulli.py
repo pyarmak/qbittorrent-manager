@@ -194,6 +194,55 @@ def is_file_currently_streaming(file_path: str, tautulli_url: str, tautulli_api_
     logger.debug(f"File is not currently streaming: {file_path}")
     return False
 
+def get_streaming_status_for_paths(file_paths: List[str], tautulli_url: str, tautulli_api_key: str) -> Dict:
+    """
+    Check a specific list of files against current Plex activity (single API call).
+
+    Used for the paths Sonarr/Radarr report as imported, i.e. the files in the
+    media library that Plex actually scanned. Those are the paths Tautulli reports
+    playback for; the torrent's own download paths are only reachable through a
+    symlink and never appear in Plex activity.
+
+    Args:
+        file_paths: Paths as qbit-manager sees them
+        tautulli_url: Tautulli base URL
+        tautulli_api_key: Tautulli API key
+
+    Returns:
+        Dict: Status information including which of `file_paths` are streaming
+    """
+    result = {
+        'is_any_file_streaming': False,
+        'streaming_files': [],
+        'total_files_checked': len(file_paths)
+    }
+
+    if not file_paths:
+        return result
+
+    try:
+        streaming_files_from_tautulli = get_currently_streaming_files(tautulli_url, tautulli_api_key)
+
+        if not streaming_files_from_tautulli:
+            logger.debug("No files currently streaming according to Tautulli")
+            return result
+
+        for local_file in file_paths:
+            for streaming_file in streaming_files_from_tautulli:
+                if paths_refer_to_same_file_with_mapping(local_file, streaming_file):
+                    result['streaming_files'].append(local_file)
+                    result['is_any_file_streaming'] = True
+                    logger.info(f"Found streaming library file: {local_file}")
+                    break
+
+        return result
+
+    except Exception as e:
+        result['error'] = str(e)
+        logger.error(f"Error checking streaming status for imported paths: {e}")
+        return result
+
+
 def get_streaming_status_for_directory(directory_path: str, tautulli_url: str, tautulli_api_key: str) -> Dict:
     """
     Get streaming status for all files in a directory (EFFICIENT - single API call)

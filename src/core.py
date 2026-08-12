@@ -694,7 +694,7 @@ def relocate_and_delete_ssd_import_script_mode(client: 'QBittorrentClient', torr
     
     try:
         # Step 1: Check if any files are currently streaming
-        from tautulli import get_streaming_status_for_directory
+        from tautulli import get_streaming_status_for_directory, get_streaming_status_for_paths
         
         streaming_status = get_streaming_status_for_directory(
             torrent_info.path, 
@@ -935,6 +935,23 @@ def relocate_and_delete_ssd_import_script_mode(client: 'QBittorrentClient', torr
         replaced_count = 0
         
         if imported_paths:
+            # The streaming check in Step 1 looks at the torrent's own download
+            # paths, which Plex only ever reaches through a symlink and therefore
+            # never reports. Now that the arr API has told us which library files
+            # this release became, re-check those — they are the paths Plex scanned
+            # and the ones Tautulli reports playback for.
+            library_streaming = get_streaming_status_for_paths(
+                imported_paths, config.TAUTULLI_URL, config.TAUTULLI_API_KEY
+            )
+            if library_streaming.get('is_any_file_streaming', False):
+                streaming_files = library_streaming.get('streaming_files', [])
+                logger.info(
+                    f"⏸️  Skipping relocation - {len(streaming_files)} library file(s) currently streaming"
+                )
+                for file_path in streaming_files:
+                    logger.info(f"   📺 Streaming: {os.path.basename(file_path)}")
+                return False, "streaming"
+
             from symlink_utils import replace_symlinks_with_hardlinks
             
             replaced_count = replace_symlinks_with_hardlinks(
