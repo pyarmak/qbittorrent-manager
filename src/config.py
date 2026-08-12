@@ -284,11 +284,43 @@ def validate_config():
         if not SONARR_ROOT_FOLDERS and not RADARR_ROOT_FOLDERS:
             warnings.append("Import script mode enabled but no root folders configured - symlink discovery may fail")
         if not TAUTULLI_API_KEY:
-            warnings.append("Tautulli API key not set - streaming checks will fail during space management")
+            warnings.append("Tautulli API key not set - streaming checks will be skipped during space management")
         if not TAUTULLI_URL:
-            warnings.append("Tautulli URL not set - streaming checks will fail during space management")
-        if not PLEX_PATH_MAPPINGS:
-            warnings.append("PLEX_PATH_MAPPINGS not configured - may cause path matching issues with Tautulli")
+            warnings.append("Tautulli URL not set - streaming checks will be skipped during space management")
+
+        # Preflight the two conditions that silently stop space management:
+        # the library has to be visible from this container, and it has to share a
+        # filesystem with the HDD copies or no hardlink can ever be created.
+        configured_roots = list(SONARR_ROOT_FOLDERS) + list(RADARR_ROOT_FOLDERS)
+        hdd_dev = None
+        if os.path.isdir(FINAL_DEST_BASE_HDD):
+            try:
+                hdd_dev = os.stat(FINAL_DEST_BASE_HDD).st_dev
+            except OSError as e:
+                warnings.append(f"Could not inspect HDD destination '{FINAL_DEST_BASE_HDD}': {e}")
+
+        for root_folder in configured_roots:
+            if not os.path.isdir(root_folder):
+                warnings.append(
+                    f"Import script mode: root folder '{root_folder}' is not accessible from this "
+                    "container. Mount it at the same path Sonarr/Radarr use, or space management "
+                    "will skip every torrent."
+                )
+                continue
+
+            if hdd_dev is None:
+                continue
+
+            try:
+                if os.stat(root_folder).st_dev != hdd_dev:
+                    warnings.append(
+                        f"Import script mode: root folder '{root_folder}' and HDD destination "
+                        f"'{FINAL_DEST_BASE_HDD}' are on different filesystems. Hardlinks cannot "
+                        "cross filesystems, so symlink replacement will always fail and the SSD "
+                        "will never be freed."
+                    )
+            except OSError as e:
+                warnings.append(f"Could not inspect root folder '{root_folder}': {e}")
     
     # Check threshold values
     if DISK_SPACE_THRESHOLD_GB < 10:
