@@ -153,6 +153,18 @@ existing library files are left untouched.
 
 Enable it with `import_script.enabled` and see `config-import-script-example.toml`
 for the full set of options (root folders, Tautulli URL/API key, path mappings).
+In Sonarr/Radarr, the script is configured under **Settings → Media Management →
+Importing** (turn on *Show Advanced*): enable *Use Script Import* and point
+*Script Import Path* at `sonarr-radarr-import.sh`.
+
+The root folders must be mounted into the qbit-manager container at the same
+paths Sonarr/Radarr use — it opens the paths the arr API reports — and must share
+a filesystem with the HDD destination, since the library entries become hardlinks
+to it. Both conditions are checked at startup and reported as warnings.
+
+`path_mappings` translates a qbit-manager path into the path Plex uses for the
+same file. Tautulli reports whatever Plex scanned, which is the file inside the
+root folder, so that is the mapping the "currently streaming" check depends on.
 
 ```mermaid
 graph TD

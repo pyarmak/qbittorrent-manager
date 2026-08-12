@@ -8,9 +8,10 @@
 # Installation:
 # 1. Copy this script to your Sonarr/Radarr container
 # 2. Make it executable: chmod +x /path/to/sonarr-radarr-import.sh  
-# 3. In Sonarr/Radarr Settings -> Media Management -> Importing:
-#    - Enable "Import using script"
-#    - Set "Import Script Path" to this script's path
+# 3. In Sonarr/Radarr: Settings -> Media Management -> Importing
+#    (turn on "Show Advanced" to reveal these options):
+#    - Enable "Use Script Import"
+#    - Set "Script Import Path" to this script's path
 #
 # Usage: This script is called automatically by Sonarr/Radarr during import
 # Arguments: $1 = Source path (SSD), $2 = Destination path (Arr's expected location)

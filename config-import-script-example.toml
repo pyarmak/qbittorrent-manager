@@ -79,15 +79,21 @@ enabled = true
 notify_arr_experimental = false
 
 # Root folder paths where Sonarr/Radarr store media
-# These are used for symlink discovery during space management
+# These are used for symlink discovery during space management.
+#
+# Requirements:
+#  - use the path as Sonarr/Radarr see it, and mount it into qbit-manager at
+#    that same path (qbit-manager opens the paths the arr API reports)
+#  - it must be on the same filesystem as paths.downloads.hdd, because the
+#    library entries are converted to hardlinks pointing at the HDD copy
 sonarr_root_folders = [
-    "/downloads/hdd/sonarr",
-    "/downloads/hdd/tv-shows"
+    "/downloads/sonarr",
+    "/downloads/tv-shows"
 ]
 
 radarr_root_folders = [
-    "/downloads/hdd/radarr", 
-    "/downloads/hdd/movies"
+    "/downloads/radarr", 
+    "/downloads/movies"
 ]
 
 # Tautulli configuration for streaming checks
@@ -96,9 +102,15 @@ tautulli_api_key = "your-tautulli-api-key-here"
 
 # Path mappings for different container mounts
 # Format: qbit-manager-path = plex-container-path
+#
+# Tautulli reports the path Plex scanned, which is the file inside the
+# Sonarr/Radarr root folder above - not the torrent's download path, which Plex
+# only ever reaches by following a symlink. So the mapping that decides whether
+# the "currently streaming" check works is the one covering your root folders.
+# Map the download paths too if a Plex library also points directly at them.
 [import_script.path_mappings]
+"/downloads" = "/Downloads"
 "/downloads/ssd" = "/mnt/ssd-cache/flood"
-"/downloads/hdd" = "/Downloads"
 
 # ===================================================================
 # Setup Instructions for Import Script Mode:
@@ -106,10 +118,12 @@ tautulli_api_key = "your-tautulli-api-key-here"
 # 
 # 1. Copy scripts/sonarr-radarr-import.sh to your Sonarr/Radarr containers
 # 2. Make it executable: chmod +x /path/to/sonarr-radarr-import.sh
-# 3. In Sonarr Settings -> Import Lists:
+# 3. In Sonarr: Settings -> Media Management -> Importing
+#    (enable "Show Advanced" to reveal these):
 #    - Enable "Use Script Import"
 #    - Set "Script Import Path" to the script location
-# 4. In Radarr Settings -> Import Lists:
+# 4. In Radarr: Settings -> Media Management -> Importing
+#    (enable "Show Advanced" to reveal these):
 #    - Enable "Use Script Import" 
 #    - Set "Script Import Path" to the script location
 # 5. Configure the root folder paths above to match your setup
