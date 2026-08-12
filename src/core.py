@@ -627,20 +627,23 @@ def manage_ssd_space(client: 'QBittorrentClient'):
             
             if success:
                 relocation_success = True
-            elif reason in ["streaming", "no_symlinks", "no_hdd_copy", "no_config",
-                            "arr_not_imported", "arr_api_error", "link_replacement_failed"]:
-                # These are "skip this torrent" conditions, not failures.
-                # link_replacement_failed in particular must never fall through to
-                # the plain relocation below: the arr library still points at the
-                # SSD copy, so deleting it would break every one of those links.
-                logger.info(f"Skipping torrent {info['torrent_info'].hash}: {reason}")
-                continue  # Skip to next torrent without trying fallback
             else:
-                # reason == "error" or other actual failure - try fallback
-                logger.warning(f"Import script mode failed ({reason}), trying fallback for {info['torrent_info'].hash}")
-                relocation_success = False
+                # Never fall through to the plain relocation while import script mode
+                # is on: Sonarr/Radarr's library may hold symlinks pointing at the SSD
+                # copy, and that path deletes it without knowing about them, leaving
+                # every one of those links dangling. Skip and retry the torrent on the
+                # next cycle instead.
+                if reason in ["streaming", "no_symlinks", "no_hdd_copy", "no_config",
+                              "arr_not_imported", "arr_api_error", "link_replacement_failed"]:
+                    logger.info(f"Skipping torrent {info['torrent_info'].hash}: {reason}")
+                else:
+                    logger.error(
+                        f"Import script mode failed ({reason}) for {info['torrent_info'].hash}. "
+                        "Skipping rather than relocating without symlink handling."
+                    )
+                continue  # Skip to next torrent
         
-        # Fallback to normal relocation if import script mode failed with an error or is disabled
+        # Normal relocation (import script mode disabled)
         if not relocation_success:
             relocation_success = relocate_and_delete_ssd(
                 client, info["torrent_info"], config.FINAL_DEST_BASE_HDD, config.DOWNLOAD_PATH_SSD
