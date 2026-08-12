@@ -2,7 +2,7 @@ FROM ghcr.io/linuxserver/unrar:latest AS unrar
 
 FROM python:3.13-alpine3.21 AS python_base
 
-FROM ghcr.io/linuxserver/baseimage-alpine:edge
+FROM ghcr.io/linuxserver/baseimage-alpine:3.21
 
 # environment settings
 ENV HOME="/config" \
