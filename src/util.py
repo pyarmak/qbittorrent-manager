@@ -126,8 +126,118 @@ def cleanup_destination(path):
         logger.error(f"Cleanup FAILED: {e}")
 
 
-def verify_copy(src_path, dst_path, is_multi):
-    """Verifies copy using size (single file) or size+count (multi-file)."""
+def _iter_parents(path, stop_path):
+    """Yields each directory from `path` up to (but excluding) `stop_path`."""
+    if not path or not stop_path:
+        return
+    current = os.path.normpath(path)
+    stop = os.path.normpath(stop_path)
+    while current != stop and current != os.path.dirname(current):
+        yield current
+        current = os.path.dirname(current)
+
+
+def ensure_destination_parent(dest_path, base_dir):
+    """
+    Prepares the parent directory tree for `dest_path` underneath `base_dir`.
+
+    Torrents whose content lives inside a root folder need that folder to exist on
+    the destination disk. Earlier releases copied such torrents to a *file* named
+    after the torrent (e.g. `<base_dir>/Movie_Folder` holding Movie.mkv's bytes),
+    which now blocks creation of the directory of the same name, so any stale
+    non-directory entry along the way is removed.
+
+    Returns True if the destination parent is ready to receive the copy.
+    """
+    import config
+
+    parent = os.path.dirname(os.path.normpath(dest_path))
+    if not parent:
+        logger.error(f"Cannot determine parent directory for destination '{dest_path}'")
+        return False
+
+    # Work top-down so an outer stale file is removed before inner directories.
+    for stale in reversed(list(_iter_parents(parent, base_dir))):
+        if os.path.lexists(stale) and not os.path.isdir(stale):
+            logger.warning(
+                f"Destination path component '{stale}' exists but is not a directory "
+                f"(leftover from an incorrectly named copy). Removing it."
+            )
+            if config.DRY_RUN:
+                logger.info(f"[DRY RUN] Would remove stale entry: {stale}")
+                continue
+            try:
+                os.remove(stale)
+            except OSError as e:
+                logger.error(f"Failed to remove stale destination entry '{stale}': {e}")
+                return False
+
+    if config.DRY_RUN:
+        if not os.path.isdir(parent):
+            logger.info(f"[DRY RUN] Would create destination directory: {parent}")
+        return True
+
+    try:
+        os.makedirs(parent, exist_ok=True)
+        return True
+    except OSError as e:
+        logger.error(f"Failed to create destination directory '{parent}': {e}")
+        return False
+
+
+def prune_empty_dirs(start_path, stop_path):
+    """
+    Removes empty directories from `start_path` upwards, stopping at `stop_path`.
+
+    Used after deleting the content of a torrent that lived inside its own root
+    folder so the now-empty folder does not linger on the cache disk. Only
+    directories strictly inside `stop_path` are touched, and only while empty.
+    """
+    import config
+
+    if not start_path or not stop_path:
+        return
+
+    start = os.path.normpath(start_path)
+    stop = os.path.normpath(stop_path)
+
+    # Never walk outside the boundary the caller asked us to stay within.
+    try:
+        if start != stop and os.path.commonpath([start, stop]) != stop:
+            logger.debug(f"Skipping prune: '{start}' is not inside '{stop}'")
+            return
+    except ValueError:
+        return
+
+    for directory in _iter_parents(start, stop):
+        if not os.path.isdir(directory) or os.path.islink(directory):
+            break
+        try:
+            if os.listdir(directory):
+                break
+        except OSError as e:
+            logger.warning(f"Could not inspect directory '{directory}': {e}")
+            break
+
+        if config.DRY_RUN:
+            logger.info(f"[DRY RUN] Would remove empty directory: {directory}")
+            break
+
+        try:
+            os.rmdir(directory)
+            logger.info(f"Removed empty directory: {directory}")
+        except OSError as e:
+            logger.warning(f"Could not remove empty directory '{directory}': {e}")
+            break
+
+
+def verify_copy(src_path, dst_path, is_directory):
+    """Verifies copy using size (single file) or size+count (directory).
+
+    `is_directory` must describe whether `src_path` is a directory, which is not
+    the same as the torrent being multi-file: a torrent with a single file inside
+    a root folder has a file as its content path.
+    """
     logger.debug("Verifying copy...")
     if not src_path or not dst_path:
         logger.error(f"Verification ERROR: Invalid paths provided - src: '{src_path}', dst: '{dst_path}'")
@@ -138,8 +248,15 @@ def verify_copy(src_path, dst_path, is_multi):
     if not os.path.exists(dst_path): 
         logger.error(f"Verification ERROR: Destination path '{dst_path}' does not exist!")
         return False
+    if os.path.isdir(src_path) != os.path.isdir(dst_path):
+        logger.error(
+            f"Verification FAILED! Source and destination types differ "
+            f"(source is a {'directory' if os.path.isdir(src_path) else 'file'}, "
+            f"destination is a {'directory' if os.path.isdir(dst_path) else 'file'})."
+        )
+        return False
     try:
-        if not is_multi: # Single file comparison
+        if not is_directory: # Single file comparison
             src_size = os.path.getsize(src_path)
             dst_size = os.path.getsize(dst_path)
             logger.debug(f"Source File Size: {src_size}")

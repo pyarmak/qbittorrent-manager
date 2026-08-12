@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import os
 import re
 from dataclasses import dataclass
 from typing import Optional, Dict, Any
@@ -82,6 +83,34 @@ class QueueItem:
     priority: int = 0  # Higher priority = processed first
 
 # ===================================================================
+# Path Helpers
+# ===================================================================
+
+def _relative_to(path: str, base: str) -> str:
+    """
+    Return ``path`` expressed relative to ``base``, or "" when not contained.
+
+    Only strict containment counts: a path equal to its base has no meaningful
+    relative layout to reproduce elsewhere.
+    """
+    if not path or not base:
+        return ""
+
+    path = os.path.normpath(path)
+    base = os.path.normpath(base)
+    if path == base:
+        return ""
+
+    try:
+        if os.path.commonpath([path, base]) != base:
+            return ""
+    except ValueError:
+        # Mixed absolute/relative paths (or different drives on Windows)
+        return ""
+
+    return os.path.relpath(path, base)
+
+# ===================================================================
 # Enhanced TorrentInfo Class
 # ===================================================================
 
@@ -135,13 +164,103 @@ class TorrentInfo:
     @property
     def directory(self) -> str:
         """Directory containing the torrent content"""
-        import os
         return os.path.dirname(self.content_path) if self.content_path else ""
     
     @property
     def is_multi_file(self) -> bool:
         """True if torrent contains multiple files"""
         return self.num_files > 1
+
+    @property
+    def is_directory_content(self) -> bool:
+        """
+        True when content_path refers to a directory rather than a single file.
+
+        A torrent with a single file inside a root folder reports num_files == 1
+        while content_path still points at the file itself, so file count alone is
+        not enough to decide between a directory copy and a file copy. The
+        filesystem is authoritative when the content is present.
+        """
+        if self.content_path and os.path.exists(self.content_path):
+            return os.path.isdir(self.content_path)
+        return self.is_multi_file
+
+    @property
+    def content_relative_path(self) -> str:
+        """
+        Location of the torrent content relative to its save path.
+
+        qBittorrent resolves every file of a torrent as `<save path>/<relative
+        path>`, so changing the save path (``torrents_set_location``) only works
+        if a copy on another disk reproduces that exact relative layout.
+
+        Examples (save path ``/downloads``):
+            single file             -> ``Movie.mkv``
+            folder with one file    -> ``Movie_Folder/Movie.mkv``
+            folder with many files  -> ``Show.S01``
+        """
+        content = os.path.normpath(self.content_path) if self.content_path else ""
+        if not content:
+            return self.name.strip()
+
+        # Preferred anchor: the save path qBittorrent reports for this torrent.
+        relative = _relative_to(content, self.save_path)
+        if relative:
+            return relative
+
+        # Fallback anchor: the torrent root folder, which always sits directly
+        # inside the save path, so its name is the first path component.
+        root = os.path.normpath(self.root_path) if self.root_path else ""
+        if root:
+            if content == root:
+                return os.path.basename(root)
+            relative = _relative_to(content, root)
+            if relative:
+                return os.path.join(os.path.basename(root), relative)
+
+        # Last resort: assume the content sits directly in the save path.
+        return self.name.strip() or os.path.basename(content)
+
+    @property
+    def content_root_name(self) -> str:
+        """First path component of the content relative to the save path."""
+        relative = self.content_relative_path
+        return relative.split(os.sep)[0] if relative else ""
+
+    @property
+    def effective_save_path(self) -> str:
+        """
+        Directory the content layout is anchored at.
+
+        Normally the save path qBittorrent reports; derived from the content path
+        when the API response did not include one.
+        """
+        if self.save_path:
+            return os.path.normpath(self.save_path)
+
+        content = os.path.normpath(self.content_path) if self.content_path else ""
+        if not content:
+            return ""
+
+        anchor = content
+        for _ in self.content_relative_path.split(os.sep):
+            anchor = os.path.dirname(anchor)
+        return anchor
+
+    def get_destination_path(self, base_dir: str) -> str:
+        """
+        Absolute path this torrent's content must occupy under ``base_dir``.
+
+        ``base_dir`` is the save path a copy is meant to be seeded from, so the
+        content is placed at the same relative location it has on the source
+        disk.
+        """
+        return os.path.join(base_dir, self.content_relative_path)
+
+    def get_destination_root(self, base_dir: str) -> str:
+        """Top level entry created under ``base_dir`` for this torrent."""
+        root_name = self.content_root_name
+        return os.path.join(base_dir, root_name) if root_name else base_dir
     
     @classmethod
     def from_qbittorrent_api(cls, torrent_dict: Dict[str, Any], files_count: Optional[int] = None) -> 'TorrentInfo':
@@ -152,8 +271,6 @@ class TorrentInfo:
             torrent_dict: Raw torrent dictionary from qBittorrent API
             files_count: Number of files (if known, avoids additional API call)
         """
-        import os
-        
         return cls(
             hash_v1=BTIH(torrent_dict.get('hash', '')),
             name=torrent_dict.get('name', ''),
@@ -314,6 +431,21 @@ Torrent C (single file):
   root_path:    <empty>
   content_path: /home/user/torrents/file1
 
+Torrent D (root folder containing a single file):
+  torrentD/
+    file1
+
+  save_path:    /home/user/torrents
+  root_path:    /home/user/torrents/torrentD
+  content_path: /home/user/torrents/torrentD/file1
+  num_files:    1  <-- reported as a "single file" torrent!
+
 For our application, content_path (%F) is typically the most useful as it points
 directly to the torrent content regardless of structure.
+
+IMPORTANT: the torrent name is NOT a reliable destination name. For Torrent D the
+name is `torrentD` while the content is a file one level deeper, so a copy has to
+be placed at `<destination>/torrentD/file1`. `TorrentInfo.content_relative_path`
+derives that layout (content_path relative to save_path) and must be used whenever
+a copy is created for qBittorrent to seed from.
 """ 

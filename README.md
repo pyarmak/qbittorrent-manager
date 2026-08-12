@@ -107,6 +107,14 @@ RADARR_TAG="radarr"                        # Category for movies
 4. **Notify Arr** → Sonarr/Radarr notified via API
 5. **Space Management** → Automatic SSD cleanup when threshold reached
 
+The HDD copy always reproduces the torrent's layout *relative to its save path*,
+because qBittorrent resolves every file as `<save path>/<relative path>` when the
+torrent is later pointed at the HDD. A torrent whose content is a folder holding a
+single file (`Movie_Folder/Movie.mkv`) is therefore copied to
+`<hdd>/<category>/Movie_Folder/Movie.mkv` — not to a file named `Movie_Folder`.
+Copies left behind by older versions using the wrong name are detected and
+replaced automatically on the next run.
+
 ```mermaid
 graph TD
     A["🎯 qBittorrent Torrent Finished"] --> B["📋 qbittorrent-notification.sh<br/>(Collects all %I, %N, %L, %F, etc. params)"]

@@ -170,6 +170,7 @@ def get_torrent_info(client: 'QBittorrentClient', hash_val: BTIH, wait_for_stabi
                 'name': torrent.name,
                 'content_path': torrent.content_path,
                 'save_path': getattr(torrent, 'save_path', ''),
+                'root_path': getattr(torrent, 'root_path', ''),
                 'size': torrent.size,
                 'category': torrent.category or '',
                 'tags': getattr(torrent, 'tags', []),

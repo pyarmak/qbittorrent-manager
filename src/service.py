@@ -286,7 +286,7 @@ class QbitManagerOrchestrator:
         """Worker function that runs copy operations in a background thread"""
         import shutil
         import os
-        from util import verify_copy
+        from util import verify_copy, ensure_destination_parent, prune_empty_dirs
         
         # Set process priority to lower CPU usage (if supported)
         try:
@@ -301,17 +301,25 @@ class QbitManagerOrchestrator:
         try:
             logger.info(f"📁 Copying {copy_item['name']} from SSD to HDD...")
             
-            # Use is_multi_file from data
-            is_multi_file = copy_item.get('is_multi_file', os.path.isdir(copy_item['ssd_path']))
+            # Whether the source is a directory decides copytree vs copy2
+            is_directory = copy_item.get('is_multi_file', os.path.isdir(copy_item['ssd_path']))
             
-            # Ensure HDD base directory exists
-            hdd_base_dir = os.path.dirname(copy_item['hdd_path'])
-            os.makedirs(hdd_base_dir, exist_ok=True)
+            # Ensure the HDD directory tree exists. The destination can sit inside
+            # the torrent's own root folder, and a stale file left there by an
+            # older release has to be cleared before that folder can be created.
+            hdd_base_dir = copy_item.get('hdd_base_dir') or os.path.dirname(copy_item['hdd_path'])
+            if not ensure_destination_parent(copy_item['hdd_path'], hdd_base_dir):
+                return {
+                    'success': False,
+                    'error': f"Could not prepare destination directory for {copy_item['hdd_path']}",
+                    'torrent_hash': copy_item['hash'],
+                    'torrent_name': copy_item['name']
+                }
             
             # Perform copy operation with performance optimizations
             copy_start_time = time.time()
             
-            if is_multi_file:
+            if is_directory:
                 # Use optimized copy function for directories
                 shutil.copytree(copy_item['ssd_path'], copy_item['hdd_path'], 
                               copy_function=self._optimized_copy_file, dirs_exist_ok=True)
@@ -323,12 +331,11 @@ class QbitManagerOrchestrator:
             logger.info(f"   ✅ Copy completed in {copy_time:.1f}s")
             
             # Verify copy
-            if verify_copy(copy_item['ssd_path'], copy_item['hdd_path'], is_multi_file):
+            if verify_copy(copy_item['ssd_path'], copy_item['hdd_path'], is_directory):
                 logger.info(f"   ✅ Copy verification successful")
                 
                 # Add HDD tag after successful copy
                 client = self.get_qbit_client()
-                import config
                 client.torrents_add_tags(tags=config.HDD_LOCATION_TAG, torrent_hashes=copy_item['hash'])
                 logger.info(f"   🏷️  Added '{config.HDD_LOCATION_TAG}' tag to {copy_item['name']}")
                 
@@ -347,6 +354,7 @@ class QbitManagerOrchestrator:
                             shutil.rmtree(copy_item['hdd_path'])
                         else:
                             os.remove(copy_item['hdd_path'])
+                    prune_empty_dirs(os.path.dirname(copy_item['hdd_path']), hdd_base_dir)
                 except Exception as cleanup_e:
                     logger.warning(f"Failed to cleanup failed copy: {cleanup_e}")
                 

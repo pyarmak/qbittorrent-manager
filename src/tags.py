@@ -97,7 +97,7 @@ def tag_existing_torrents_by_location(client: 'QBittorrentClient', dry_run=False
         dict: Summary of tagging operations including any copy operations
     """
     import config
-    from util import verify_copy
+    from util import verify_copy, ensure_destination_parent, prune_empty_dirs
     
     if not config.ENABLE_LOCATION_TAGGING:
         logger.warning("Location tagging is disabled in configuration")
@@ -146,7 +146,10 @@ def tag_existing_torrents_by_location(client: 'QBittorrentClient', dry_run=False
                         torrent_category = torrent_info.category or ''
                         if torrent_category:
                             expected_hdd_base = os.path.join(config.FINAL_DEST_BASE_HDD, torrent_category)
-                            expected_hdd_path = os.path.join(expected_hdd_base, torrent_info.name.strip())
+                            # Reproduce the layout qBittorrent expects under a save
+                            # path (a torrent whose single file lives in a root
+                            # folder needs `<base>/<folder>/<file>`, not `<base>/<name>`)
+                            expected_hdd_path = torrent_info.get_destination_path(expected_hdd_base)
                             
                             if os.path.exists(expected_hdd_path):
                                 # HDD copy exists - ensure HDD tag is present
@@ -161,10 +164,11 @@ def tag_existing_torrents_by_location(client: 'QBittorrentClient', dry_run=False
                                     'name': torrent_info.name,
                                     'ssd_path': torrent_info.content_path,
                                     'hdd_path': expected_hdd_path,
+                                    'hdd_base_dir': expected_hdd_base,
                                     'category': torrent_category,
                                     'current_tags': current_tags,
                                     'size': torrent_info.size,
-                                    'is_multi_file': torrent_info.is_multi_file,
+                                    'is_multi_file': torrent_info.is_directory_content,
                                     'action': 'copy_and_tag_hdd'
                                 })
                         else:
@@ -309,17 +313,20 @@ def tag_existing_torrents_by_location(client: 'QBittorrentClient', dry_run=False
                     try:
                         logger.info(f"📁 Copying {item['name']} from SSD to HDD...")
                         
-                        # Use is_multi_file from data
-                        is_multi_file = item.get('is_multi_file', os.path.isdir(item['ssd_path']))
+                        # Whether the source is a directory decides copytree vs copy2
+                        is_directory = item.get('is_multi_file', os.path.isdir(item['ssd_path']))
                         
-                        # Ensure HDD base directory exists
-                        hdd_base_dir = os.path.dirname(item['hdd_path'])
-                        os.makedirs(hdd_base_dir, exist_ok=True)
+                        # Ensure HDD directory tree exists (clearing stale entries)
+                        hdd_base_dir = item.get('hdd_base_dir') or os.path.dirname(item['hdd_path'])
+                        if not ensure_destination_parent(item['hdd_path'], hdd_base_dir):
+                            logger.error(f"   ❌ Could not prepare destination for {item['name']}")
+                            copy_failed += 1
+                            continue
                         
                         # Perform copy operation
                         copy_start_time = time.time()
                         try:
-                            if is_multi_file:
+                            if is_directory:
                                 shutil.copytree(item['ssd_path'], item['hdd_path'], copy_function=shutil.copy2, dirs_exist_ok=True)
                             else:
                                 shutil.copy2(item['ssd_path'], item['hdd_path'])
@@ -328,7 +335,7 @@ def tag_existing_torrents_by_location(client: 'QBittorrentClient', dry_run=False
                             logger.info(f"   ✅ Copy completed in {copy_time:.1f}s")
                             
                             # Verify copy
-                            if verify_copy(item['ssd_path'], item['hdd_path'], is_multi_file):
+                            if verify_copy(item['ssd_path'], item['hdd_path'], is_directory):
                                 logger.info(f"   ✅ Copy verification successful")
                                 
                                 # Add HDD tag after successful copy
@@ -345,6 +352,7 @@ def tag_existing_torrents_by_location(client: 'QBittorrentClient', dry_run=False
                                             shutil.rmtree(item['hdd_path'])
                                         else:
                                             os.remove(item['hdd_path'])
+                                    prune_empty_dirs(os.path.dirname(item['hdd_path']), hdd_base_dir)
                                 except:
                                     pass
                                 copy_failed += 1

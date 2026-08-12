@@ -12,7 +12,8 @@ from qbit import (
     get_torrents_by_status_and_tag
 )
 from util import (
-    verify_copy, get_available_space_gb, cleanup_destination
+    verify_copy, get_available_space_gb, cleanup_destination,
+    ensure_destination_parent, prune_empty_dirs
 )
 # Import configuration constants
 import config
@@ -114,16 +115,72 @@ def notify_arr_scan_downloads(service_type, download_id: 'BTIH', arr_config, hdd
         logger.error(f"Unexpected error during {service_name} notification: {e}")
 
 
+def copy_torrent_content(source_path: str, dest_path: str, dest_base_dir: str, source_is_dir: bool):
+    """
+    Copies torrent content to `dest_path`, preparing the directory tree first.
+
+    `dest_path` mirrors the content's location relative to the save path, so it
+    may sit inside the torrent's root folder (e.g. `<base>/Movie_Folder/Movie.mkv`).
+
+    Returns True if the copy completed without raising.
+    """
+    if not ensure_destination_parent(dest_path, dest_base_dir):
+        return False
+
+    if config.DRY_RUN:
+        logger.info(f"[DRY RUN] Would copy {'directory' if source_is_dir else 'file'} from {source_path} to {dest_path}")
+        return True
+
+    copy_start_time = time.time()
+    if source_is_dir:
+        shutil.copytree(source_path, dest_path, copy_function=shutil.copy2, dirs_exist_ok=True)
+    else:
+        shutil.copy2(source_path, dest_path)
+    logger.info(f"Copy finished in {time.time() - copy_start_time:.2f} seconds.")
+    return True
+
+
+def wait_for_storage_move(client: 'QBittorrentClient', torrent_hash: str, timeout: int = 300):
+    """
+    Waits for qBittorrent to finish relocating a torrent's storage.
+
+    `torrents_set_location` triggers an asynchronous move, and deleting the source
+    data while that move is in flight can corrupt it, so wait for the torrent to
+    leave the 'moving' state before touching the SSD copy.
+    """
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            torrent = get_torrent_by_hash(client, torrent_hash)
+        except Exception as e:
+            logger.warning(f"Could not check move status for {torrent_hash}: {e}")
+            return True
+
+        if getattr(torrent, 'state', '') != 'moving':
+            return True
+
+        logger.info("qBittorrent is still moving torrent storage. Waiting...")
+        time.sleep(2)
+
+    logger.warning(f"Timed out after {timeout}s waiting for qBittorrent to finish moving storage.")
+    return False
+
+
 def relocate_and_delete_ssd(client: 'QBittorrentClient', torrent_info: 'TorrentInfo', final_dest_base_hdd: str, download_path_ssd: str):
     """ Stops torrent, sets qBittorrent location to HDD path, deletes SSD copy, restarts. Uses qBittorrent API."""
     hdd_base_dir = os.path.join(final_dest_base_hdd, torrent_info.category)
+    # qBittorrent resolves content as <save path>/<relative path>, so the HDD copy
+    # must reproduce the SSD layout rather than being named after the torrent.
+    expected_hdd_path = torrent_info.get_destination_path(hdd_base_dir)
+    source_is_dir = torrent_info.is_directory_content
     logger.info(f"Attempting relocation for {torrent_info.hash} ('{torrent_info.name}'):")
     logger.info(f"SSD path (to delete): {torrent_info.path}")
     logger.info(f"Target HDD base dir (for qBittorrent): {hdd_base_dir}")
+    logger.info(f"Expected HDD content path: {expected_hdd_path}")
 
     if config.DRY_RUN:
         logger.info(f"[DRY RUN] Would relocate torrent {torrent_info.hash} from SSD to HDD")
-        logger.info(f"[DRY RUN] Would stop torrent, update directory to {hdd_base_dir}, delete {torrent_info.path}, restart torrent")
+        logger.info(f"[DRY RUN] Would stop torrent, ensure data exists at {expected_hdd_path}, update directory to {hdd_base_dir}, delete {torrent_info.path}, restart torrent")
         return True
 
     was_started = False; start_successful = True; delete_successful = False
@@ -147,52 +204,55 @@ def relocate_and_delete_ssd(client: 'QBittorrentClient', torrent_info: 'TorrentI
         else: 
             logger.info("Torrent is already paused.")
 
+        # CRITICAL: the HDD copy must be in place *before* qBittorrent is pointed at
+        # it, otherwise the torrent ends up with missing files at the new location.
+        logger.info(f"Ensuring a verified HDD copy exists at: {expected_hdd_path}")
+
+        hdd_copy_ready = False
+        if os.path.exists(expected_hdd_path):
+            # An existing destination is never trusted blindly: a run killed
+            # mid-copy leaves truncated data behind, and deleting the SSD copy on
+            # top of that would destroy the only intact copy.
+            if verify_copy(torrent_info.path, expected_hdd_path, source_is_dir):
+                logger.info("Existing HDD copy verified.")
+                hdd_copy_ready = True
+            else:
+                logger.warning("Existing HDD copy failed verification. Replacing it.")
+                cleanup_destination(expected_hdd_path)
+
+        if not hdd_copy_ready:
+            logger.info("Copying data from SSD to HDD before relocating...")
+
+            try:
+                if not copy_torrent_content(torrent_info.path, expected_hdd_path, hdd_base_dir, source_is_dir):
+                    if was_started:
+                        logger.info("Attempting to resume torrent after copy failure...")
+                        client.torrents_resume(torrent_hashes=str(torrent_info.hash))
+                    return False
+
+                # Verify the copy was successful
+                # Note: verify_copy already imported at top of file
+                if not verify_copy(torrent_info.path, expected_hdd_path, source_is_dir):
+                    logger.error(f"Copy verification failed!")
+                    if was_started: 
+                        logger.info("Attempting to resume torrent after copy failure...")
+                        client.torrents_resume(torrent_hashes=str(torrent_info.hash))
+                    return False
+                logger.info(f"Copy verification successful.")
+
+            except (shutil.Error, OSError) as e:
+                logger.error(f"Failed to copy data to HDD: {e}")
+                if was_started: 
+                    logger.info("Attempting to resume torrent after copy failure...")
+                    client.torrents_resume(torrent_hashes=str(torrent_info.hash))
+                return False
+
         logger.info("Updating torrent location via qBittorrent API...")
         # In qBittorrent, we use set_location to move the torrent base directory
         client.torrents_set_location(location=hdd_base_dir, torrent_hashes=str(torrent_info.hash))
         logger.info("Successfully updated torrent location.")
         time.sleep(0.5)
-
-        # CRITICAL: Verify destination exists before deleting source
-        expected_hdd_path = os.path.join(hdd_base_dir, torrent_info.name.strip())
-        logger.info(f"Verifying destination exists at: {expected_hdd_path}")
-        
-        if not os.path.exists(expected_hdd_path):
-            logger.warning(f"Destination path '{expected_hdd_path}' does not exist!")
-            logger.info(f"Need to copy data from SSD to HDD first...")
-            
-            if config.DRY_RUN:
-                logger.info(f"[DRY RUN] Would copy {'directory' if torrent_info.is_multi_file else 'file'} from {torrent_info.path} to {expected_hdd_path}")
-            else:
-                try:
-                    # Ensure base directory exists
-                    os.makedirs(hdd_base_dir, exist_ok=True)
-                    
-                    copy_start_time = time.time()
-                    if torrent_info.is_multi_file:
-                        shutil.copytree(torrent_info.path, expected_hdd_path, copy_function=shutil.copy2, dirs_exist_ok=True)
-                    else:
-                        shutil.copy2(torrent_info.path, expected_hdd_path)
-                    logger.info(f"Copy completed in {time.time() - copy_start_time:.2f} seconds.")
-                    
-                    # Verify the copy was successful
-                    # Note: verify_copy already imported at top of file
-                    if not verify_copy(torrent_info.path, expected_hdd_path, torrent_info.is_multi_file):
-                        logger.error(f"Copy verification failed!")
-                        if was_started: 
-                            logger.info("Attempting to resume torrent after copy failure...")
-                            client.torrents_resume(torrent_hashes=str(torrent_info.hash))
-                        return False
-                    logger.info(f"Copy verification successful.")
-                    
-                except (shutil.Error, OSError) as e:
-                    logger.error(f"Failed to copy data to HDD: {e}")
-                    if was_started: 
-                        logger.info("Attempting to resume torrent after copy failure...")
-                        client.torrents_resume(torrent_hashes=str(torrent_info.hash))
-                    return False
-        else:
-            logger.info(f"Destination already exists on HDD.")
+        wait_for_storage_move(client, str(torrent_info.hash))
 
         logger.info(f"Destination verified. Proceeding to delete SSD data at: {torrent_info.path}")
         
@@ -230,6 +290,11 @@ def relocate_and_delete_ssd(client: 'QBittorrentClient', torrent_info: 'TorrentI
             except OSError as e: 
                 logger.error(f"Error deleting SSD data: {e}")
                 delete_successful = False
+
+        # A torrent stored inside its own root folder leaves that folder behind
+        # once its content is gone; drop it so the cache disk stays clean.
+        if delete_successful:
+            prune_empty_dirs(os.path.dirname(torrent_info.path), torrent_info.effective_save_path or download_path_ssd)
 
         # Update location tags if tagging is enabled
         if delete_successful:
@@ -271,20 +336,30 @@ def process_single_torrent_optimized(client: 'QBittorrentClient', torrent_info: 
     is_multi = torrent_info.is_multi_file
     ssd_data_path = torrent_info.path
     category = torrent_info.category
+    # A torrent can report a single file while its content lives inside a root
+    # folder, so ask the filesystem instead of trusting the file count.
+    source_is_dir = torrent_info.is_directory_content
 
     # 2. Construct Paths using config paths
     hdd_base_dir = os.path.join(config.FINAL_DEST_BASE_HDD, category)
-    hdd_data_path = os.path.join(hdd_base_dir, torrent_info.name.strip())
+    # Mirror the content's location relative to the save path so qBittorrent can
+    # seed straight from the HDD copy once its location is updated.
+    hdd_data_path = torrent_info.get_destination_path(hdd_base_dir)
     logger.info(f"Source SSD Path: {ssd_data_path}")
     logger.info(f"Target HDD Path: {hdd_data_path}")
+    logger.info(f"Content layout (relative to save path): {torrent_info.content_relative_path}")
     logger.info(f"Torrent Category: {category}")
     logger.info(f"Multi-file: {is_multi} ({torrent_info.size / (1024**3):.2f} GB)")
+
+    if not ssd_data_path:
+        logger.error(f"Torrent {torrent_info.hash} has no content path. Cannot process.")
+        return False
 
     # 3. Pre-Copy Check: Handle existing destination from previous script run
     if os.path.exists(hdd_data_path):
         logger.warning(f"Destination path '{hdd_data_path}' already exists.")
         # Call verify_copy from util
-        if verify_copy(ssd_data_path, hdd_data_path, is_multi):
+        if verify_copy(ssd_data_path, hdd_data_path, source_is_dir):
             logger.info("Existing destination verified successfully. Skipping copy.")
             copy_verified = True # Treat existing verified copy as success
         else:
@@ -306,21 +381,9 @@ def process_single_torrent_optimized(client: 'QBittorrentClient', torrent_info: 
             # Attempt Copy
             copy_succeeded_this_attempt = False
             try:
-                # Ensure base directory exists before copy
-                os.makedirs(hdd_base_dir, exist_ok=True)
-                copy_start_time = time.time()
-                
-                if config.DRY_RUN:
-                    logger.info(f"[DRY RUN] Would copy {'directory' if is_multi else 'file'} from {ssd_data_path} to {hdd_data_path}")
-                    copy_succeeded_this_attempt = True
-                else:
-                    if is_multi:
-                        shutil.copytree(ssd_data_path, hdd_data_path, copy_function=shutil.copy2, dirs_exist_ok=True)
-                    else:
-                        os.makedirs(os.path.dirname(hdd_data_path), exist_ok=True)
-                        shutil.copy2(ssd_data_path, hdd_data_path)
-                    logger.info(f"Copy finished in {time.time() - copy_start_time:.2f} seconds (Attempt {attempt}).")
-                    copy_succeeded_this_attempt = True
+                copy_succeeded_this_attempt = copy_torrent_content(
+                    ssd_data_path, hdd_data_path, hdd_base_dir, source_is_dir
+                )
             except (shutil.Error, OSError) as e:
                 logger.error(f"Error during copy (Attempt {attempt}): {e}")
 
@@ -331,7 +394,7 @@ def process_single_torrent_optimized(client: 'QBittorrentClient', torrent_info: 
                     logger.info(f"[DRY RUN] Would verify copy integrity")
                     copy_verified = True; break
                 # Call verify_copy from util
-                elif verify_copy(ssd_data_path, hdd_data_path, is_multi):
+                elif verify_copy(ssd_data_path, hdd_data_path, source_is_dir):
                     copy_verified = True; break # Success! Exit loop.
                 else:
                     logger.warning(f"Verification failed on attempt {attempt}.") # Loop continues
@@ -364,6 +427,8 @@ def process_single_torrent_optimized(client: 'QBittorrentClient', torrent_info: 
     else:
          logger.error(f"--- Failed processing (OPTIMIZED): {torrent_info.hash} ---")
          if os.path.exists(hdd_data_path): cleanup_destination(hdd_data_path) # Final cleanup
+         # Drop the torrent's root folder on the HDD if the failed copy left it empty
+         prune_empty_dirs(os.path.dirname(hdd_data_path), hdd_base_dir)
          success = False
 
     logger.info(f"--- Finished optimized processing for {torrent_info.hash} in {time.time() - start_process_time:.2f} seconds ---")
