@@ -2,3 +2,4 @@ docker-data/
 .env
 
 src/__pycache__/
+config.toml

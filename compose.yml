@@ -6,6 +6,8 @@ services:
     volumes:
       - ./docker-data/qbit:/config
       - ./docker-data/downloads:/downloads
+      - ./docker-data/downloading:/downloading
+      - ./scripts:/scripts
     ports:
       - ${QBIT_WEB_PORT:-8080}:8080 # qBittorrent WebUI port
       # - 6881:6881/tcp # Optional: BitTorrent port
@@ -15,6 +17,8 @@ services:
       - PUID=${PUID}
       - PGID=${PGID}
       - WEBUI_PORT=8080
+      - QBIT_MANAGER_URL=http://qbit-manager:8081
+      - QBIT_MANAGER_API_KEY=${QBIT_MANAGER_API_KEY}
   qbit-manager:
     build: .
     container_name: qbit-manager
@@ -24,6 +28,7 @@ services:
     volumes:
       - ./docker-data/qbit-manager:/config
       - ./docker-data/downloads:/downloads
+      - ./docker-data/downloading:/downloading
     ports:
       - ${HTTP_PORT:-8081}:8081
     environment:

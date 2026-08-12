@@ -115,6 +115,28 @@ single file (`Movie_Folder/Movie.mkv`) is therefore copied to
 Copies left behind by older versions using the wrong name are detected and
 replaced automatically on the next run.
 
+### Import Script Mode (optional)
+
+Instead of letting Sonarr/Radarr copy or hardlink media themselves, they can run
+`scripts/sonarr-radarr-import.sh`, which **symlinks** the library entry straight at
+the SSD copy so the media is playable immediately while the HDD copy is still being
+written in the background. During space management, before the SSD copy is removed,
+qbit-manager:
+
+1. asks **Tautulli** whether any of those files are currently streaming, and skips
+   the torrent if so;
+2. asks the **Sonarr/Radarr API** to confirm the release was actually imported;
+3. converts the library symlinks into **hardlinks to the HDD copy**, so the library
+   keeps working with no extra disk usage;
+4. only then repoints qBittorrent at the HDD and deletes the SSD copy.
+
+Conversions are staged and swapped in atomically — if the HDD copy is missing,
+empty, or on a filesystem that cannot be hardlinked, the conversion fails and the
+existing library files are left untouched.
+
+Enable it with `import_script.enabled` and see `config-import-script-example.toml`
+for the full set of options (root folders, Tautulli URL/API key, path mappings).
+
 ```mermaid
 graph TD
     A["🎯 qBittorrent Torrent Finished"] --> B["📋 qbittorrent-notification.sh<br/>(Collects all %I, %N, %L, %F, etc. params)"]

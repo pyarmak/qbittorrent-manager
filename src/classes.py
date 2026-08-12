@@ -86,6 +86,25 @@ class QueueItem:
 # Path Helpers
 # ===================================================================
 
+def is_directory_content(content_path: str, num_files: int) -> bool:
+    """
+    Decide whether torrent content should be handled as a directory or a file.
+
+    File count alone is not enough: qBittorrent reports a torrent whose single
+    file lives inside a root folder as ``num_files == 1`` while ``content_path``
+    still points at the file, so the filesystem is consulted whenever the content
+    is present.
+
+    Examples (content_path -> result):
+        ``/dl/Movie.mkv`` (1 file, no folder)            -> False (a file)
+        ``/dl/Movie_Folder/Movie.mkv`` (1 file in folder) -> False (a file)
+        ``/dl/Show.S01`` (many files)                     -> True  (a directory)
+    """
+    if content_path and os.path.exists(content_path):
+        return os.path.isdir(content_path)
+    return num_files > 1
+
+
 def _relative_to(path: str, base: str) -> str:
     """
     Return ``path`` expressed relative to ``base``, or "" when not contained.
@@ -181,9 +200,7 @@ class TorrentInfo:
         not enough to decide between a directory copy and a file copy. The
         filesystem is authoritative when the content is present.
         """
-        if self.content_path and os.path.exists(self.content_path):
-            return os.path.isdir(self.content_path)
-        return self.is_multi_file
+        return is_directory_content(self.content_path, self.num_files)
 
     @property
     def content_relative_path(self) -> str:
