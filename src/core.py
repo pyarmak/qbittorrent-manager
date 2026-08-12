@@ -233,6 +233,9 @@ def relocate_and_delete_ssd(client: 'QBittorrentClient', torrent_info: 'TorrentI
 
         # CRITICAL: the HDD copy must be in place *before* qBittorrent is pointed at
         # it, otherwise the torrent ends up with missing files at the new location.
+        # It also keeps qBittorrent's move a no-op: with everything already present
+        # libtorrent's dont_replace skips every file, so the HDD volume can stay
+        # mounted read-only in the qBittorrent container. Copy first, relocate after.
         logger.info(f"Ensuring a verified HDD copy exists at: {expected_hdd_path}")
 
         hdd_copy_ready = False

@@ -115,6 +115,23 @@ single file (`Movie_Folder/Movie.mkv`) is therefore copied to
 Copies left behind by older versions using the wrong name are detected and
 replaced automatically on the next run.
 
+#### Why the HDD volume can be mounted read-only in qBittorrent
+
+qbit-manager owns every write to the HDD destination; qBittorrent only ever reads
+from it. `torrents_set_location` is issued **after** the copy exists and has been
+verified, and qBittorrent moves storage with libtorrent's `dont_replace` flag, so
+it stats the destination (already present, no `mkdir`) and skips every file
+(already present, no `move_file`). The move performs no writes, the follow-up
+recheck is read-only, and seeding is read-only — so mounting the HDD path `:ro` in
+the qBittorrent container is safe and makes a useful safety boundary.
+
+This only holds while that invariant does. If the copy is missing, incomplete, or
+at the wrong path, libtorrent falls into the other branch and tries to create
+directories and move files into that mount, which fails with `EROFS` on a
+read-only bind mount and leaves the torrent unable to relocate. Both causes are
+prevented above: the destination mirrors the content layout, and the copy is
+created and verified before the location is changed.
+
 ### Import Script Mode (optional)
 
 Instead of letting Sonarr/Radarr copy or hardlink media themselves, they can run
